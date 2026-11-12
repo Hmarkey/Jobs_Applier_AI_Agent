@@ -64,6 +64,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 .wrap { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 22px; margin: 0; font-weight: 600; }
@@ -183,6 +184,46 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; }
 .shot img { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; display: block; }
 details summary { cursor: pointer; color: var(--text-2); margin: 16px 0 8px; }
 @media (max-width: 520px) { .form { grid-template-columns: 1fr; } dl.facts { grid-template-columns: 80px 1fr; } }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+.tab { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 14px; color: var(--text-2); margin-bottom: -1px; }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.tab:hover { color: var(--text); }
+.tab .count { color: var(--muted); font-weight: 400; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.notice { border: 1px solid var(--border); border-left: 3px solid var(--series-4); background: var(--surface); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 13px; }
+.notice.bad { border-left-color: var(--critical); }
+select.pick { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 6px 8px; }
+label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
+td.pick, th.pick { width: 36px; padding-right: 0; }
+td.pick input, th.pick input { width: 16px; height: 16px; cursor: pointer; }
+tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.more { display: block; margin: 12px auto 0; }
+.score { display: inline-block; min-width: 34px; text-align: center; border-radius: 6px; padding: 0 6px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.score.hi { background: color-mix(in srgb, var(--series-3) 18%, transparent); }
+.score.mid { background: color-mix(in srgb, var(--series-4) 18%, transparent); }
+.score.lo { color: var(--muted); }
+.selbar { position: sticky; bottom: 12px; z-index: 5; display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.10); }
+.selbar .what { font-weight: 600; }
+.selbar .spacer { flex: 1; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.danger { border-color: var(--critical); color: var(--critical); }
+.btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--critical) 10%, transparent); }
+.head-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; flex: none; }
+.progress { margin-bottom: 16px; }
+.progress .now { font-weight: 600; }
+.progress .note { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+.meter { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; margin: 10px 0; }
+.meter span { display: block; height: 100%; background: var(--accent); }
+.results { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.results li { display: grid; grid-template-columns: 20px 1fr; gap: 6px; font-size: 13px; }
+.results .ok { color: var(--good-text); }
+.results .no { color: var(--critical); }
+.modal { position: fixed; z-index: 25; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(560px, calc(100vw - 32px)); max-height: calc(100vh - 64px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25); }
+.modal h2 { font-size: 18px; margin-bottom: 8px; }
+.modal ol { margin: 8px 0; padding-left: 22px; max-height: 260px; overflow-y: auto; }
+.modal ol li { margin: 2px 0; }
+.modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.modal .warn { color: var(--text-2); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -195,6 +236,46 @@ details summary { cursor: pointer; color: var(--text-2); margin: 16px 0 8px; }
     <button class="btn" id="refresh" type="button">刷新</button>
   </header>
 
+  <nav class="tabs" role="tablist" aria-label="视图">
+    <button class="tab" role="tab" id="tab-apps" aria-controls="view-apps" aria-selected="true" type="button">申请记录<span class="count" id="count-apps"></span></button>
+    <button class="tab" role="tab" id="tab-jobs" aria-controls="view-jobs" aria-selected="false" type="button">找到的职位<span class="count" id="count-jobs"></span></button>
+  </nav>
+
+  <section id="view-jobs" role="tabpanel" aria-labelledby="tab-jobs" hidden>
+    <div id="job-notices"></div>
+    <div class="card progress" id="progress" hidden></div>
+    <div class="filters">
+      <input class="search" id="job-search" type="search" placeholder="搜索公司 / 职位 / 地点 / 网站…" aria-label="搜索职位">
+      <select class="pick" id="job-min" aria-label="最低匹配分">
+        <option value="">全部匹配分</option>
+        <option value="3">匹配分 ≥ 3</option>
+        <option value="2.5">匹配分 ≥ 2.5</option>
+        <option value="2">匹配分 ≥ 2</option>
+        <option value="1.5">匹配分 ≥ 1.5</option>
+      </select>
+      <label class="check"><input type="checkbox" id="job-scored" checked> 只看已打分</label>
+      <span class="shown" id="job-shown"></span>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>找到的职位</h2><p class="hint">AIHawk 搜索到、还没有申请过的职位，按匹配分排序。点击一行查看职位详情，勾选后在下方发送。</p></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th class="pick"><input type="checkbox" id="job-all" aria-label="选中当前显示的全部职位" title="选中当前显示的职位"></th><th>匹配分</th><th>公司</th><th>职位</th><th>地点</th><th>网站</th><th>状态</th></tr></thead>
+          <tbody id="job-rows"></tbody>
+        </table>
+      </div>
+      <button class="btn more" id="job-more" type="button" hidden>显示更多</button>
+    </div>
+    <div class="selbar" id="selbar" hidden>
+      <span class="what" id="sel-count"></span>
+      <button class="btn" id="sel-clear" type="button">清空</button>
+      <span class="spacer"></span>
+      <span class="muted" id="sel-why"></span>
+      <button class="btn primary" id="sel-send" type="button">发送申请…</button>
+    </div>
+  </section>
+
+  <div id="view-apps" role="tabpanel" aria-labelledby="tab-apps">
   <div class="filters" id="filters">
     <input class="search" id="search" type="search" placeholder="搜索公司 / 职位 / 地点 / 备注…" aria-label="搜索">
     <span class="shown" id="shown"></span>
@@ -234,11 +315,13 @@ details summary { cursor: pointer; color: var(--text-2); margin: 16px 0 8px; }
       </table>
     </div>
   </section>
+  </div>
 </div>
 
 <div id="tooltip" role="tooltip" hidden></div>
 <div class="backdrop" id="backdrop" hidden></div>
 <aside class="drawer" id="drawer" hidden aria-modal="true" role="dialog" aria-labelledby="d-title"></aside>
+<div class="modal" id="confirm" hidden role="alertdialog" aria-modal="true" aria-labelledby="c-title"></div>
 
 <script>
 "use strict";
@@ -271,6 +354,8 @@ function el(tag, props = {}, ...kids) {
   }
   return node;
 }
+// replaceChildren writes an empty part as the text "null": the parts a view leaves out are dropped first.
+function fill(node, ...kids) { node.replaceChildren(...kids.filter(kid => kid !== null && kid !== undefined && kid !== false)); }
 function svg(tag, attrs = {}) {
   const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
@@ -316,14 +401,27 @@ async function load() {
     if (!response.ok) throw new Error(body.error || response.status);
     state.items = body.items;
     state.stages = body.stages;
-    document.getElementById("updated").textContent = `共 ${body.items.length} 条记录 · 更新于 ${new Date().toLocaleTimeString()} · 每 30 秒自动刷新`;
+    state.loadedAt = new Date();
+    state.loadError = "";
+    document.getElementById("count-apps").textContent = body.items.length;
     render();
     // A link to one application (#job=<id>) opens it, once, when the page first loads.
     if (!state.loaded && location.hash.startsWith("#job=")) openDrawer(decodeURIComponent(location.hash.slice(5)));
     state.loaded = true;
   } catch (error) {
-    document.getElementById("updated").replaceChildren(el("span", { class: "err", text: `读取失败：${error.message}` }));
+    state.loadError = error.message;
   }
+  renderSubtitle();
+}
+
+// The line under the title speaks of the view shown: the applications, or the jobs found.
+function renderSubtitle() {
+  const line = document.getElementById("updated");
+  const [error, at, what] = state.view === "jobs"
+    ? [jobs.loadError, jobs.loadedAt, `共 ${jobs.items.length} 个职位，已打分 ${jobs.items.filter(item => typeof item.score === "number").length} 个`]
+    : [state.loadError, state.loadedAt, `共 ${state.items.length} 条记录`];
+  if (error) { line.replaceChildren(el("span", { class: "err", text: `读取失败：${error}` })); return; }
+  line.textContent = at ? `${what} · 更新于 ${at.toLocaleTimeString()} · 每 30 秒自动刷新` : "读取中…";
 }
 
 function filtered() {
@@ -562,6 +660,7 @@ async function openDrawer(id) {
   const item = state.items.find(entry => entry.id === id);
   if (!item) return;
   state.openId = id;
+  state.openJobId = null;
   hideTip();
   const links = [["职位链接", item.url], ["提交后的页面", item.final_url]]
     .map(([name, url]) => [name, safeHref(url)]).filter(([, url]) => url)
@@ -609,7 +708,7 @@ async function openDrawer(id) {
     ["花费", money(item.cost)],
   ];
   const shotUrl = `/api/proof?id=${encodeURIComponent(id)}`;
-  drawer.replaceChildren(
+  fill(drawer,
     el("div", { class: "drawer-head" },
       el("div", {}, el("h2", { id: "d-title", text: item.title }), el("div", { class: "muted", text: [item.company, item.location].filter(Boolean).join(" · ") })),
       el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
@@ -649,20 +748,328 @@ async function openDrawer(id) {
 }
 function closeDrawer() {
   state.openId = null;
+  state.openJobId = null;
   drawer.hidden = true;
   backdrop.hidden = true;
-  history.replaceState(null, "", location.pathname);
+  history.replaceState(null, "", state.view === "jobs" ? "#jobs" : location.pathname);
 }
-backdrop.addEventListener("click", closeDrawer);
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !drawer.hidden) closeDrawer(); });
+backdrop.addEventListener("click", () => { if (confirmBox.hidden) closeDrawer(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (!confirmBox.hidden) closeConfirm();
+  else if (!drawer.hidden) closeDrawer();
+});
+
+// ---------- views ----------
+function showView(view) {
+  state.view = view;
+  for (const [name, tab, panel] of [["apps", "tab-apps", "view-apps"], ["jobs", "tab-jobs", "view-jobs"]]) {
+    document.getElementById(tab).setAttribute("aria-selected", String(view === name));
+    document.getElementById(panel).hidden = view !== name;
+  }
+  // A link to one application (#job=…) is kept: load() opens it once the records are here.
+  if (drawer.hidden && !location.hash.startsWith("#job=")) history.replaceState(null, "", view === "jobs" ? "#jobs" : location.pathname);
+  if (view === "apps") renderDaily();
+  renderSubtitle();
+}
+
+// ---------- jobs found ----------
+const PAGE_ROWS = 200;
+const jobs = { items: [], meta: {}, selected: new Set(), search: "", min: "", scoredOnly: true, limit: PAGE_ROWS, send: null, loaded: false };
+const confirmBox = document.getElementById("confirm");
+
+async function loadFound() {
+  try {
+    const response = await fetch("/api/found", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    jobs.items = body.items;
+    jobs.meta = body;
+    const here = new Set(body.items.map(item => item.id));
+    for (const id of [...jobs.selected]) if (!here.has(id)) jobs.selected.delete(id);
+    jobs.loaded = true;
+    jobs.loadedAt = new Date();
+    jobs.loadError = "";
+    renderJobs();
+  } catch (error) {
+    jobs.loadError = error.message;
+    document.getElementById("job-notices").replaceChildren(el("div", { class: "notice bad", text: `职位列表读取失败：${error.message}` }));
+  }
+  renderSubtitle();
+}
+
+// Refresh reads both lists again and says what changed, so a click that finds nothing new still answers.
+async function refresh() {
+  const button = document.getElementById("refresh");
+  if (button.disabled) return;
+  const before = { found: jobs.items.length, scored: jobs.items.filter(item => typeof item.score === "number").length, apps: state.items.length };
+  button.disabled = true;
+  button.textContent = "刷新中…";
+  await Promise.all([load(), loadFound()]);
+  const scored = jobs.items.filter(item => typeof item.score === "number").length;
+  const changes = [
+    [jobs.items.length - before.found, "职位"],
+    [scored - before.scored, "已打分"],
+    [state.items.length - before.apps, "申请记录"],
+  ].filter(([n]) => n).map(([n, what]) => `${what} ${n > 0 ? "+" : ""}${n}`);
+  const failed = state.loadError || jobs.loadError;
+  button.textContent = failed ? "刷新失败" : changes.length ? `已刷新：${changes.join("，")}` : "已刷新，没有变化";
+  setTimeout(() => { button.textContent = "刷新"; button.disabled = false; }, 2500);
+}
+
+function jobsShown() {
+  const words = jobs.search.trim().toLowerCase();
+  const min = jobs.min === "" ? null : Number(jobs.min);
+  return jobs.items.filter(item =>
+    (!jobs.scoredOnly || typeof item.score === "number") &&
+    (min === null || (typeof item.score === "number" && item.score >= min)) &&
+    (!words || [item.company, item.title, item.location, item.site].join(" ").toLowerCase().includes(words)));
+}
+
+function scoreBadge(score) {
+  if (typeof score !== "number") return el("span", { class: "score lo", text: "—" });
+  return el("span", { class: `score ${score >= 3 ? "hi" : score >= 2 ? "mid" : "lo"}`, text: score.toFixed(1) });
+}
+
+function sending() { return Boolean(jobs.send && jobs.send.running); }
+
+function renderJobs() {
+  document.getElementById("count-jobs").textContent = jobs.loaded ? jobs.items.length : "";
+  renderNotices();
+  renderProgress();
+  const shown = jobsShown();
+  const scoredCount = jobs.items.filter(item => typeof item.score === "number").length;
+  document.getElementById("job-shown").textContent = `显示 ${shown.length} / ${jobs.items.length} 个 · 已打分 ${scoredCount} 个`;
+  const visible = shown.slice(0, jobs.limit);
+  const body = document.getElementById("job-rows");
+  if (!visible.length) {
+    body.replaceChildren(el("tr", {}, el("td", { colspan: "7", class: "empty",
+      text: jobs.items.length ? "没有符合筛选的职位" : "还没有找到职位。先在 AIHawk 终端里读入简历，等它下载职位并打分。" })));
+  } else {
+    body.replaceChildren(...visible.map(item => {
+      const chosen = jobs.selected.has(item.id);
+      const box = el("input", { type: "checkbox", "aria-label": `选中 ${item.company} ${item.title}`, checked: chosen, disabled: sending() });
+      box.addEventListener("click", e => e.stopPropagation());
+      box.addEventListener("change", () => toggle(item.id, box.checked));
+      return el("tr", { class: chosen ? "chosen" : null, tabindex: "0", onclick: () => openJobDrawer(item.id),
+        onkeydown: e => { if (e.key === "Enter") openJobDrawer(item.id); else if (e.key === " ") { e.preventDefault(); toggle(item.id, !jobs.selected.has(item.id)); } } },
+        el("td", { class: "pick" }, box),
+        el("td", { class: "num" }, scoreBadge(item.score)),
+        el("td", { class: "co", text: item.company }),
+        el("td", { text: item.title }),
+        el("td", { class: "muted", text: item.location || "—" }),
+        el("td", { class: "muted", text: item.site }),
+        el("td", { class: "muted", text: item.status_words }));
+    }));
+  }
+  const more = document.getElementById("job-more");
+  more.hidden = shown.length <= jobs.limit;
+  more.textContent = `显示更多（还有 ${shown.length - jobs.limit} 个）`;
+  const all = document.getElementById("job-all");
+  const picked = visible.filter(item => jobs.selected.has(item.id)).length;
+  all.checked = visible.length > 0 && picked === visible.length;
+  all.indeterminate = picked > 0 && picked < visible.length;
+  all.disabled = sending() || !visible.length;
+  renderSelbar();
+}
+
+function toggle(id, on) {
+  if (sending()) return;
+  if (on) jobs.selected.add(id); else jobs.selected.delete(id);
+  renderJobs();
+  if (state.openJobId === id) openJobDrawer(id, true);
+}
+
+function renderNotices() {
+  const notes = [];
+  if (jobs.meta.blocked) notes.push(el("div", { class: "notice bad", text: jobs.meta.blocked }));
+  if (jobs.meta.dry_run) notes.push(el("div", { class: "notice", text: "试运行模式（AIHAWK_DRY_RUN 已设置）：会打开浏览器并填写表单，但不会真正提交。" }));
+  document.getElementById("job-notices").replaceChildren(...notes);
+}
+
+function renderSelbar() {
+  const count = jobs.selected.size;
+  const bar = document.getElementById("selbar");
+  bar.hidden = count === 0 && !sending();
+  document.getElementById("sel-count").textContent = sending() ? "正在发送申请…" : `已选 ${count} 个职位`;
+  const why = jobs.meta.blocked ? "现在不能发送" : count > (jobs.meta.batch || 50) ? `一次最多 ${jobs.meta.batch || 50} 个` : "";
+  document.getElementById("sel-why").textContent = sending() ? "" : why;
+  document.getElementById("sel-send").disabled = sending() || !count || Boolean(why);
+  document.getElementById("sel-clear").disabled = sending() || !count;
+}
+
+// ---------- one job found ----------
+async function openJobDrawer(id, keepScroll = false) {
+  const item = jobs.items.find(entry => entry.id === id);
+  if (!item) return;
+  const scroll = drawer.scrollTop;
+  state.openId = null;
+  state.openJobId = id;
+  hideTip();
+  const href = safeHref(item.url);
+  const chosen = jobs.selected.has(id);
+  const pick = el("button", { class: chosen ? "btn" : "btn primary", type: "button", disabled: sending(),
+    text: chosen ? "取消选中" : "选中这个职位", onclick: () => toggle(id, !jobs.selected.has(id)) });
+  const description = el("div", { class: "text-block", text: "读取中…" });
+  drawer.replaceChildren(
+    el("div", { class: "drawer-head" },
+      el("div", {}, el("h2", { id: "d-title", text: item.title }), el("div", { class: "muted", text: [item.company, item.location].filter(Boolean).join(" · ") })),
+      el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
+    el("div", { class: "links" }, href ? el("a", { href, target: "_blank", rel: "noopener noreferrer", text: "职位链接 ↗" }) : null),
+    el("dl", { class: "facts" }, ...[
+      ["匹配分", typeof item.score === "number" ? `${item.score.toFixed(1)} / 5` : "还没有打分"],
+      ["状态", item.status_words],
+      ["网站", item.site || "—"],
+      ["地点", item.location || "—"],
+    ].flatMap(([name, value]) => [el("dt", { text: name }), el("dd", { text: value })])),
+    el("div", { class: "links" }, pick),
+    el("h3", { text: "职位描述" }),
+    description,
+  );
+  drawer.hidden = false;
+  backdrop.hidden = false;
+  drawer.scrollTop = keepScroll ? scroll : 0;
+  if (!keepScroll) drawer.querySelector("button").focus();
+  try {
+    const response = await fetch(`/api/found/job?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    if (state.openJobId !== id) return;
+    description.textContent = body.description || "这个职位来源没有提供描述，请打开职位链接查看。";
+  } catch (error) {
+    description.replaceChildren(el("span", { class: "err", text: `读取失败：${error.message}` }));
+  }
+}
+
+// ---------- sending ----------
+function chosenJobs() {
+  const byId = Object.fromEntries(jobs.items.map(item => [item.id, item]));
+  return [...jobs.selected].map(id => byId[id]).filter(Boolean)
+    .sort((a, b) => (typeof b.score === "number" ? b.score : -1) - (typeof a.score === "number" ? a.score : -1));
+}
+
+function openConfirm() {
+  const list = chosenJobs();
+  if (!list.length || sending()) return;
+  const go = el("button", { class: "btn primary", type: "button", text: `确认发送 ${list.length} 份申请` });
+  const status = el("span", { class: "err", "aria-live": "polite" });
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    status.textContent = "";
+    try {
+      const response = await fetch("/api/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: list.map(item => item.id) }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || response.status);
+      jobs.send = body;
+      jobs.selected.clear();
+      closeConfirm();
+      renderJobs();
+      pollSend();
+    } catch (error) {
+      status.textContent = `没有开始：${error.message}`;
+      go.disabled = false;
+    }
+  });
+  confirmBox.replaceChildren(
+    el("h2", { id: "c-title", text: jobs.meta.dry_run ? `试运行 ${list.length} 份申请？` : `发送 ${list.length} 份申请？` }),
+    el("p", { class: "warn", text: jobs.meta.dry_run
+      ? "AIHawk 会依次打开浏览器填写下面这些职位的申请表，但不会提交。"
+      : "AIHawk 会按顺序打开浏览器，填写并真正提交下面这些职位的申请。每份通常需要几分钟，你可以在浏览器窗口里看着它操作。提交后无法撤回。" }),
+    el("ol", {}, ...list.map(item => el("li", {}, el("b", { text: item.company }), ` · ${item.title}`, typeof item.score === "number" ? el("span", { class: "muted", text: ` · ${item.score.toFixed(1)}` }) : null))),
+    el("p", { class: "warn", text: "发送期间请不要同时在 AIHawk 终端里发送申请：两边会抢同一个浏览器。可以随时点「发完这份后停止」，或「立即终止」当前这份。" }),
+    el("div", { class: "actions" }, status, el("button", { class: "btn", type: "button", text: "取消", onclick: closeConfirm }), go));
+  confirmBox.hidden = false;
+  backdrop.hidden = false;
+  go.focus();
+}
+function closeConfirm() {
+  confirmBox.hidden = true;
+  if (drawer.hidden) backdrop.hidden = true;
+}
+
+let pollTimer = null;
+async function pollSend() {
+  clearTimeout(pollTimer);
+  try {
+    const response = await fetch("/api/apply", { cache: "no-store" });
+    const body = await response.json();
+    if (response.ok) {
+      const wasRunning = sending();
+      jobs.send = body;
+      renderProgress();
+      renderSelbar();
+      if (wasRunning && !body.running) { await loadFound(); await load(); }
+      else if (body.results.length !== (pollSend.seen || 0)) { pollSend.seen = body.results.length; loadFound(); load(); }
+    }
+  } catch { /* the next poll tries again */ }
+  if (sending()) pollTimer = setTimeout(pollSend, 2000);
+}
+
+function renderProgress() {
+  const box = document.getElementById("progress");
+  const send = jobs.send;
+  if (!send || (!send.running && !send.results.length && !send.error)) { box.hidden = true; return; }
+  box.hidden = false;
+  const done = send.results.length;
+  const head = send.running
+    ? (send.current ? `正在发送第 ${send.number} / ${send.total} 份：${send.current.company} · ${send.current.title}` : "正在准备…")
+    : `这批申请结束了：${summaryWords(send.results)}`;
+  const stop = el("button", { class: "btn", type: "button", disabled: send.stopping, text: send.stopping ? "发完这份后停止…" : "发完这份后停止" });
+  stop.addEventListener("click", async () => {
+    stop.disabled = true;
+    try { const r = await fetch("/api/apply/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { stop.disabled = false; }
+  });
+  const end = el("button", { class: "btn danger", type: "button", disabled: send.terminating, text: send.terminating ? "正在终止…" : "立即终止" });
+  end.addEventListener("click", async () => {
+    if (!confirm("立即终止正在进行的申请，并关闭它的浏览器？\n\n如果它正好已经点了提交按钮，这份申请可能已经发出。被终止的职位会记为「未发出：被你终止」，不会自动重发。")) return;
+    end.disabled = true;
+    try { const r = await fetch("/api/apply/terminate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { end.disabled = false; }
+  });
+  const hide = el("button", { class: "btn", type: "button", text: "收起", onclick: () => { jobs.send = null; renderProgress(); } });
+  fill(box,
+    el("div", { class: "drawer-head" }, el("div", {}, el("div", { class: "now", text: head }),
+      send.running ? el("div", { class: "note", text: send.terminating ? "正在关闭浏览器并结束这份申请…" : send.note || "每份申请通常需要几分钟。AI 服务偶尔会几分钟没有回应，这时请耐心等待。" }) : null),
+      send.running ? el("div", { class: "head-actions" }, stop, end) : hide),
+    send.total ? el("div", { class: "meter", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(send.total), "aria-valuenow": String(done) },
+      el("span", { style: `width: ${Math.round(100 * done / send.total)}%` })) : null,
+    send.error ? el("div", { class: "notice bad", text: send.error }) : null,
+    send.results.length ? el("ul", { class: "results" }, ...send.results.map(result => {
+      const ok = result.status === "submitted" || result.status === "unconfirmed";
+      return el("li", {}, el("span", { class: ok ? "ok" : "no", text: result.status === "submitted" ? "✓" : result.status === "unconfirmed" ? "?" : "✗" }),
+        el("span", {}, el("b", { text: result.company }), ` · ${result.title} — ${result.status_words}`,
+          result.reason_words && !ok ? `：${result.reason_words}` : "",
+          result.needs_mail ? el("div", { class: "muted", text: "需要先登录邮箱：在 AIHawk 终端里按 e → Your mail 登录后，再从这里重新发送。" }) : null));
+    })) : null,
+    !send.running && send.results.some(r => r.status !== "skipped") ? el("p", { class: "hint", text: "结果已记在「申请记录」里，可以在那里查看截图和填写内容。" }) : null);
+}
+function summaryWords(results) {
+  const n = status => results.filter(r => r.status === status).length;
+  const sentCount = n("submitted"), unsure = n("unconfirmed"), notSent = results.length - sentCount - unsure;
+  return [[sentCount, "已发送并确认"], [unsure, "已发送未确认"], [notSent, "未发出"]].filter(([c]) => c).map(([c, w]) => `${c} 份${w}`).join("，") || "没有发送";
+}
 
 // ---------- wiring ----------
 document.getElementById("search").addEventListener("input", e => { state.search = e.target.value; renderChips(); renderTable(); });
-document.getElementById("refresh").addEventListener("click", load);
+document.getElementById("refresh").addEventListener("click", refresh);
+document.getElementById("tab-apps").addEventListener("click", () => showView("apps"));
+document.getElementById("tab-jobs").addEventListener("click", () => showView("jobs"));
+document.getElementById("job-search").addEventListener("input", e => { jobs.search = e.target.value; jobs.limit = PAGE_ROWS; renderJobs(); });
+document.getElementById("job-min").addEventListener("change", e => { jobs.min = e.target.value; jobs.limit = PAGE_ROWS; renderJobs(); });
+document.getElementById("job-scored").addEventListener("change", e => { jobs.scoredOnly = e.target.checked; jobs.limit = PAGE_ROWS; renderJobs(); });
+document.getElementById("job-more").addEventListener("click", () => { jobs.limit += PAGE_ROWS; renderJobs(); });
+document.getElementById("job-all").addEventListener("change", e => {
+  if (sending()) return;
+  for (const item of jobsShown().slice(0, jobs.limit)) { if (e.target.checked) jobs.selected.add(item.id); else jobs.selected.delete(item.id); }
+  renderJobs();
+});
+document.getElementById("sel-clear").addEventListener("click", () => { jobs.selected.clear(); renderJobs(); });
+document.getElementById("sel-send").addEventListener("click", openConfirm);
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDaily, 150); });
-setInterval(() => { if (!document.hidden) load(); }, 30000);
+setInterval(() => { if (!document.hidden) { load(); loadFound(); } }, 30000);
+showView(location.hash === "#jobs" ? "jobs" : "apps");
 load();
+loadFound().then(pollSend);
 </script>
 </body>
 </html>
