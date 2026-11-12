@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投递看板</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --hover: rgba(11, 11, 11, 0.04);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --accent: #2a78d6;
+  --critical: #d03b3b;
+  --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --hover: rgba(255, 255, 255, 0.05);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --accent: #3987e5;
+    --good-text: #0ca30c;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --hover: rgba(255, 255, 255, 0.05);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --accent: #3987e5;
+  --good-text: #0ca30c;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0; font-weight: 600; }
+h2 { font-size: 15px; margin: 0; font-weight: 600; }
+.sub, .hint { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.btn { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; }
+.btn:hover { background: var(--hover); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); }
+
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: 5px 12px; }
+.chip[aria-pressed="true"] { border-color: var(--text); font-weight: 600; }
+.chip:hover { background: var(--hover); }
+.search { flex: 1 1 220px; max-width: 320px; border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 6px 10px; }
+.shown { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.g-active { background: var(--series-1); fill: var(--series-1); }
+.g-waiting { background: var(--series-2); fill: var(--series-2); }
+.g-ended { background: var(--series-3); fill: var(--series-3); }
+.g-not_sent { background: var(--series-4); fill: var(--series-4); }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; min-width: 0; }
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 700px) { .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile .label { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 600; margin-top: 6px; line-height: 1.2; }
+.tile .value small { font-size: 14px; color: var(--muted); font-weight: 400; margin-left: 2px; }
+.tile .note { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+.charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 860px) { .charts { grid-template-columns: minmax(0, 1fr); } }
+.card-head { margin-bottom: 12px; }
+
+.donut-wrap { display: flex; align-items: center; justify-content: center; gap: 28px; flex-wrap: wrap; }
+#donut path { cursor: pointer; stroke: var(--surface); stroke-width: 2px; }
+#donut path.dim { opacity: 0.35; }
+.donut-total { font-size: 28px; font-weight: 600; fill: var(--text); }
+.donut-caption { font-size: 12px; fill: var(--muted); }
+.legend { list-style: none; margin: 0; padding: 0; min-width: 200px; }
+.legend li { display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; cursor: pointer; }
+.legend li:hover { background: var(--hover); }
+.legend .count { font-weight: 600; font-variant-numeric: tabular-nums; }
+.legend .pct { color: var(--muted); font-size: 12px; width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+.legend-inline { display: flex; flex-wrap: wrap; gap: 14px; list-style: none; margin: 8px 0 0; padding: 0; color: var(--text-2); font-size: 12px; }
+.legend-inline li { display: inline-flex; align-items: center; gap: 6px; }
+
+#daily { display: block; width: 100%; }
+#daily .grid { stroke: var(--grid); stroke-width: 1; }
+#daily .base { stroke: var(--axis); stroke-width: 1; }
+#daily text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#daily .hit { fill: transparent; }
+#daily .hit:hover { fill: var(--hover); }
+
+.bars { display: grid; gap: 8px; }
+.bar-row { display: grid; grid-template-columns: minmax(90px, 160px) 1fr; align-items: center; gap: 10px; }
+.bar-row .name { color: var(--text-2); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bar-fill { height: 14px; border-radius: 0 4px 4px 0; min-width: 2px; }
+.bar-val { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.agenda { display: grid; }
+.agenda-row { display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: start; padding: 10px 4px; border-top: 1px solid var(--border); cursor: pointer; }
+.agenda-row:first-child { border-top: 0; }
+.agenda-row:hover { background: var(--hover); }
+.agenda .date { font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+.agenda .dow { color: var(--muted); font-size: 12px; }
+.agenda .who { font-weight: 600; }
+.agenda .what { color: var(--text-2); font-size: 13px; }
+.agenda .left { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.tag { display: inline-block; margin-left: 6px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; font-weight: 400; color: var(--text-2); }
+
+.empty { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; min-width: 900px; border-collapse: collapse; }
+td.result { min-width: 120px; }
+th, td { text-align: left; padding: 8px 10px; border-top: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; border-top: 0; white-space: nowrap; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+tbody tr { cursor: pointer; }
+tbody tr:hover, tbody tr:focus { background: var(--hover); outline: none; }
+.stage { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.co { font-weight: 600; }
+.muted { color: var(--muted); }
+.err { color: var(--critical); }
+
+#tooltip { position: fixed; z-index: 30; pointer-events: none; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); max-width: 260px; }
+#tooltip .t-head { font-weight: 600; margin-bottom: 4px; }
+#tooltip .t-row { display: flex; align-items: center; gap: 6px; }
+#tooltip .t-row b { margin-left: auto; padding-left: 12px; font-variant-numeric: tabular-nums; }
+
+.backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.3); z-index: 10; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(620px, 100vw); background: var(--surface); border-left: 1px solid var(--border); z-index: 20; overflow-y: auto; padding: 20px 20px 40px; box-shadow: -8px 0 24px rgba(0, 0, 0, 0.12); }
+.drawer-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.drawer-head .btn { flex: none; white-space: nowrap; }
+.drawer h2 { font-size: 18px; }
+.drawer h3 { font-size: 14px; margin: 22px 0 8px; }
+.links { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.links a { color: var(--accent); text-decoration: none; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; font-size: 13px; }
+.links a:hover { background: var(--hover); }
+dl.facts { display: grid; grid-template-columns: 96px 1fr; gap: 6px 12px; margin: 16px 0 0; }
+dl.facts dt { color: var(--muted); font-size: 13px; }
+dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+.form { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.form label { display: grid; gap: 4px; font-size: 12px; color: var(--text-2); }
+.form .full { grid-column: 1 / -1; }
+.form input, .form select, .form textarea { border: 1px solid var(--border); background: var(--page); border-radius: 8px; padding: 6px 8px; }
+.form textarea { min-height: 80px; resize: vertical; }
+.form-actions { display: flex; align-items: center; gap: 10px; }
+.saved { font-size: 12px; color: var(--good-text); }
+.text-block { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-size: 13px; max-height: 480px; overflow-y: auto; }
+.shot img { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; display: block; }
+details summary { cursor: pointer; color: var(--text-2); margin: 16px 0 8px; }
+@media (max-width: 520px) { .form { grid-template-columns: 1fr; } dl.facts { grid-template-columns: 80px 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>投递看板</h1>
+      <p class="sub" id="updated">读取中…</p>
+    </div>
+    <button class="btn" id="refresh" type="button">刷新</button>
+  </header>
+
+  <div class="filters" id="filters">
+    <input class="search" id="search" type="search" placeholder="搜索公司 / 职位 / 地点 / 备注…" aria-label="搜索">
+    <span class="shown" id="shown"></span>
+  </div>
+
+  <section class="tiles" id="tiles" aria-label="概览"></section>
+
+  <section class="charts">
+    <div class="card">
+      <div class="card-head"><h2>申请状态分布</h2><p class="hint">点击扇区或图例只看该状态；此图按全部记录计算，不受筛选影响</p></div>
+      <div class="donut-wrap">
+        <svg id="donut" width="200" height="200" viewBox="0 0 200 200" role="img" aria-label="申请状态分布"></svg>
+        <ul class="legend" id="legend"></ul>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>每日申请</h2><p class="hint">最近 30 天 AIHawk 处理的申请，按当前状态着色</p></div>
+      <svg id="daily" height="220" role="img" aria-label="每日申请数量"></svg>
+      <ul class="legend-inline" id="daily-legend"></ul>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>未发出原因</h2><p class="hint">AIHawk 没有提交的申请，按原因统计</p></div>
+      <div class="bars" id="reasons"></div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>近期日程</h2><p class="hint">填了「下一步日期」的申请，今天及以后，按日期排序</p></div>
+      <div class="agenda" id="agenda"></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态</p></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>日期</th><th>公司</th><th>职位</th><th>网站</th><th>AIHawk 结果</th><th>跟进状态</th><th>匹配分</th><th>下一步</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<div id="tooltip" role="tooltip" hidden></div>
+<div class="backdrop" id="backdrop" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-modal="true" role="dialog" aria-labelledby="d-title"></aside>
+
+<script>
+"use strict";
+
+// The four groups, in fixed order: each keeps its colour wherever it appears.
+const GROUPS = [
+  { key: "active", name: "进行中" },
+  { key: "waiting", name: "等待回复" },
+  { key: "ended", name: "已结束" },
+  { key: "not_sent", name: "未发出" },
+];
+const GROUP_NAME = Object.fromEntries(GROUPS.map(g => [g.key, g.name]));
+const DAYS = 30;
+const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+const state = { items: [], stages: {}, group: "all", search: "", openId: null };
+
+// ---------- small helpers ----------
+function el(tag, props = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    node.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+}
+function svg(tag, attrs = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  return node;
+}
+const pad = n => String(n).padStart(2, "0");
+const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const localDate = text => { const [y, m, d] = text.split("-").map(Number); return new Date(y, m - 1, d); };
+function when(item) { const d = new Date(item.when); return isNaN(d) ? null : d; }
+function fmtDate(item) { const d = when(item); return d ? dayKey(d) : ""; }
+function fmtDateTime(item) { const d = when(item); return d ? `${dayKey(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}` : ""; }
+function money(cost) {
+  if (cost === null || cost === undefined) return "—";
+  return cost < 0.005 ? "不到 1 美分" : `$${cost.toFixed(2)}`;
+}
+function safeHref(url) {
+  try { const u = new URL(url); return u.protocol === "http:" || u.protocol === "https:" ? u.href : null; } catch { return null; }
+}
+function swatch(group) { return el("span", { class: `sw g-${group}`, "aria-hidden": "true" }); }
+const sent = item => item.group !== "not_sent";
+
+// ---------- tooltip ----------
+const tip = document.getElementById("tooltip");
+function showTip(event, head, rows) {
+  tip.replaceChildren(el("div", { class: "t-head", text: head }),
+    ...rows.map(([group, label, value]) => el("div", { class: "t-row" }, group ? swatch(group) : null, label, el("b", { text: value }))));
+  tip.hidden = false;
+  moveTip(event);
+}
+function moveTip(event) {
+  const x = Math.min(event.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+  const y = Math.min(event.clientY + 14, window.innerHeight - tip.offsetHeight - 8);
+  tip.style.left = `${x}px`;
+  tip.style.top = `${y}px`;
+}
+function hideTip() { tip.hidden = true; }
+
+// ---------- data ----------
+async function load() {
+  try {
+    const response = await fetch("/api/data", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    state.items = body.items;
+    state.stages = body.stages;
+    document.getElementById("updated").textContent = `共 ${body.items.length} 条记录 · 更新于 ${new Date().toLocaleTimeString()} · 每 30 秒自动刷新`;
+    render();
+    // A link to one application (#job=<id>) opens it, once, when the page first loads.
+    if (!state.loaded && location.hash.startsWith("#job=")) openDrawer(decodeURIComponent(location.hash.slice(5)));
+    state.loaded = true;
+  } catch (error) {
+    document.getElementById("updated").replaceChildren(el("span", { class: "err", text: `读取失败：${error.message}` }));
+  }
+}
+
+function filtered() {
+  const words = state.search.trim().toLowerCase();
+  return state.items.filter(item => (state.group === "all" || item.group === state.group) &&
+    (!words || [item.company, item.title, item.location, item.site, item.notes, item.next_event].join(" ").toLowerCase().includes(words)));
+}
+function setGroup(group) {
+  state.group = state.group === group ? "all" : group;
+  render();
+}
+
+// ---------- render ----------
+function render() {
+  renderChips();
+  renderTiles();
+  renderDonut();
+  renderDaily();
+  renderReasons();
+  renderAgenda();
+  renderTable();
+}
+
+function renderChips() {
+  const bar = document.getElementById("filters");
+  bar.querySelectorAll(".chip").forEach(chip => chip.remove());
+  const chips = [["all", "全部"], ...GROUPS.map(g => [g.key, g.name])].map(([key, name]) =>
+    el("button", { class: "chip", type: "button", "aria-pressed": String(state.group === key), onclick: () => { state.group = key; render(); } },
+      key === "all" ? null : swatch(key), name));
+  bar.prepend(...chips);
+  const shown = filtered().length;
+  document.getElementById("shown").textContent = `显示 ${shown} / ${state.items.length} 条`;
+}
+
+function renderTiles() {
+  const items = state.items;
+  const count = group => items.filter(item => item.group === group).length;
+  const sentItems = items.filter(sent);
+  const interviewed = sentItems.filter(item => item.interviewed || item.group === "active").length;
+  const scored = sentItems.filter(item => typeof item.score === "number");
+  const scorePool = scored.length ? scored : items.filter(item => typeof item.score === "number");
+  const avg = scorePool.length ? (scorePool.reduce((sum, item) => sum + item.score, 0) / scorePool.length).toFixed(1) : "—";
+  const cost = items.reduce((sum, item) => sum + (item.cost || 0), 0);
+  const rate = sentItems.length ? Math.round(100 * interviewed / sentItems.length) : null;
+  const tiles = [
+    { label: "投递总数", value: sentItems.length, note: "已发出的申请" },
+    { label: "进行中", group: "active", value: count("active"), note: "面试中 / 已获 Offer" },
+    { label: "等待回复", group: "waiting", value: count("waiting") },
+    { label: "已结束", group: "ended", value: count("ended"), note: "被拒 / 放弃 / 无回音" },
+    { label: "未发出", group: "not_sent", value: count("not_sent"), note: "含试运行" },
+    { label: "面试转化率", value: rate === null ? "—" : rate, unit: rate === null ? "" : "%", note: `${interviewed} 份进入面试` },
+    { label: "平均匹配分", value: avg, unit: avg === "—" ? "" : "/ 5", note: scored.length ? "已发出的申请" : "Jev 打分" },
+    { label: "AIHawk 花费", value: money(cost), note: "OrcaRouter 计费" },
+  ];
+  document.getElementById("tiles").replaceChildren(...tiles.map(tile =>
+    el("div", { class: "card tile" },
+      el("div", { class: "label" }, tile.group ? swatch(tile.group) : null, tile.label),
+      el("div", { class: "value" }, String(tile.value), tile.unit ? el("small", { text: tile.unit }) : null),
+      tile.note ? el("div", { class: "note", text: tile.note }) : null)));
+}
+
+function renderDonut() {
+  const host = document.getElementById("donut");
+  const total = state.items.length;
+  const parts = GROUPS.map(g => ({ ...g, value: state.items.filter(item => item.group === g.key).length }));
+  host.replaceChildren();
+  const cx = 100, cy = 100, outer = 92, inner = 62;
+  if (!total) {
+    host.append(svg("circle", { cx, cy, r: (outer + inner) / 2, fill: "none", stroke: "var(--grid)", "stroke-width": outer - inner }));
+  }
+  let angle = -Math.PI / 2;
+  for (const part of parts) {
+    if (!part.value) continue;
+    const sweep = 2 * Math.PI * part.value / total;
+    const end = angle + sweep;
+    const path = svg("path", { d: arc(cx, cy, outer, inner, angle, end), class: `g-${part.key}${state.group !== "all" && state.group !== part.key ? " dim" : ""}`,
+      tabindex: "0", role: "button", "aria-label": `${part.name} ${part.value}` });
+    path.addEventListener("mousemove", e => showTip(e, part.name, [[part.key, "数量", part.value], [null, "占比", `${Math.round(100 * part.value / total)}%`]]));
+    path.addEventListener("mouseleave", hideTip);
+    path.addEventListener("click", () => setGroup(part.key));
+    path.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setGroup(part.key); } });
+    host.append(path);
+    angle = end;
+  }
+  const label = svg("text", { x: cx, y: cy + 4, "text-anchor": "middle", class: "donut-total" });
+  label.textContent = total;
+  const caption = svg("text", { x: cx, y: cy + 24, "text-anchor": "middle", class: "donut-caption" });
+  caption.textContent = "条记录";
+  host.append(label, caption);
+
+  document.getElementById("legend").replaceChildren(...parts.map(part =>
+    el("li", { onclick: () => setGroup(part.key), title: "点击筛选" },
+      swatch(part.key), el("span", { text: part.name }), el("span", { class: "count", text: part.value }),
+      el("span", { class: "pct", text: total ? `${Math.round(100 * part.value / total)}%` : "—" }))));
+}
+function arc(cx, cy, r1, r0, a0, a1) {
+  if (a1 - a0 >= 2 * Math.PI - 1e-6) a1 = a0 + 2 * Math.PI - 1e-4;
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+  return `M ${p(r1, a0)} A ${r1} ${r1} 0 ${large} 1 ${p(r1, a1)} L ${p(r0, a1)} A ${r0} ${r0} 0 ${large} 0 ${p(r0, a0)} Z`;
+}
+
+function renderDaily() {
+  const host = document.getElementById("daily");
+  const width = Math.max(host.clientWidth || host.parentNode.clientWidth - 32, 280);
+  const height = 220, left = 32, right = 8, top = 10, bottom = 26;
+  host.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  host.replaceChildren();
+  const today = new Date();
+  const days = [];
+  for (let back = DAYS - 1; back >= 0; back--) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - back);
+    days.push({ key: dayKey(d), date: d, counts: Object.fromEntries(GROUPS.map(g => [g.key, 0])), total: 0 });
+  }
+  const byKey = Object.fromEntries(days.map(day => [day.key, day]));
+  for (const item of state.items) {
+    const d = when(item);
+    const day = d && byKey[dayKey(d)];
+    if (day) { day.counts[item.group] += 1; day.total += 1; }
+  }
+  const max = Math.max(...days.map(day => day.total));
+  document.getElementById("daily-legend").replaceChildren(...GROUPS.map(g => el("li", {}, swatch(g.key), g.name)));
+  if (!max) {
+    const text = svg("text", { x: width / 2, y: height / 2, "text-anchor": "middle" });
+    text.textContent = "最近 30 天还没有申请";
+    host.append(text);
+    return;
+  }
+  const step = niceStep(max);
+  const top_ = Math.ceil(max / step) * step;
+  const plotH = height - top - bottom;
+  const y = v => top + plotH - plotH * v / top_;
+  for (let v = 0; v <= top_; v += step) {
+    host.append(svg("line", { x1: left, x2: width - right, y1: y(v), y2: y(v), class: v === 0 ? "base" : "grid" }));
+    const label = svg("text", { x: left - 6, y: y(v) + 4, "text-anchor": "end" });
+    label.textContent = v;
+    host.append(label);
+  }
+  const band = (width - left - right) / days.length;
+  const barW = Math.max(2, Math.min(24, band * 0.62));
+  days.forEach((day, index) => {
+    const x0 = left + index * band;
+    const x = x0 + (band - barW) / 2;
+    let base = 0;
+    const present = GROUPS.filter(g => day.counts[g.key]);
+    present.forEach((g, i) => {
+      const value = day.counts[g.key];
+      const yTop = y(base + value), yBottom = y(base);
+      const gapTop = i < present.length - 1 ? 1 : 0;   // 2px surface gap between stacked parts: 1px off each side
+      const gapBottom = i > 0 ? 1 : 0;
+      const h = Math.max(1, yBottom - yTop - gapTop - gapBottom);
+      const isTop = i === present.length - 1;
+      host.append(svg("path", { d: isTop ? roundedTop(x, yTop + gapTop, barW, h, Math.min(4, barW / 2, h)) : `M${x} ${yTop + gapTop}h${barW}v${h}h${-barW}Z`, class: `g-${g.key}` }));
+      base += value;
+    });
+    if (index % 5 === (DAYS - 1) % 5) {
+      const label = svg("text", { x: x0 + band / 2, y: height - 8, "text-anchor": "middle" });
+      label.textContent = `${pad(day.date.getMonth() + 1)}-${pad(day.date.getDate())}`;
+      host.append(label);
+    }
+    const hit = svg("rect", { x: x0, y: top, width: band, height: plotH, class: "hit" });
+    hit.addEventListener("mousemove", e => showTip(e, `${day.key} ${WEEKDAYS[day.date.getDay()]}`,
+      [...GROUPS.filter(g => day.counts[g.key]).map(g => [g.key, g.name, day.counts[g.key]]), [null, "合计", day.total]]));
+    hit.addEventListener("mouseleave", hideTip);
+    host.append(hit);
+  });
+}
+function niceStep(max) {
+  for (const step of [1, 2, 5, 10, 20, 50, 100, 200, 500]) if (max / step <= 5) return step;
+  return 1000;
+}
+function roundedTop(x, y, w, h, r) {
+  return `M${x} ${y + h}V${y + r}Q${x} ${y} ${x + r} ${y}H${x + w - r}Q${x + w} ${y} ${x + w} ${y + r}V${y + h}Z`;
+}
+
+function renderReasons() {
+  const counts = new Map();
+  for (const item of state.items) {
+    if (item.group !== "not_sent") continue;
+    const name = item.reason_words || "原因未记录";
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const host = document.getElementById("reasons");
+  if (!rows.length) { host.replaceChildren(el("div", { class: "empty", text: "没有未发出的申请" })); return; }
+  const max = rows[0][1];
+  host.replaceChildren(...rows.map(([name, value]) => {
+    const fill = el("span", { class: "bar-fill g-not_sent", style: `width: calc((100% - 40px) * ${value / max})` });
+    const row = el("div", { class: "bar-row" }, el("span", { class: "name", title: name, text: name }),
+      el("span", { class: "bar-track" }, fill, el("span", { class: "bar-val", text: value })));
+    row.addEventListener("mousemove", e => showTip(e, name, [["not_sent", "未发出", value]]));
+    row.addEventListener("mouseleave", hideTip);
+    return row;
+  }));
+}
+
+function renderAgenda() {
+  const today = dayKey(new Date());
+  const rows = state.items.filter(item => item.next_date && item.next_date >= today).sort((a, b) => a.next_date.localeCompare(b.next_date));
+  const host = document.getElementById("agenda");
+  if (!rows.length) { host.replaceChildren(el("div", { class: "empty", text: "还没有安排。在申请详情里填写「下一步日期」，就会出现在这里。" })); return; }
+  host.replaceChildren(...rows.map(item => {
+    const date = localDate(item.next_date);
+    const left = Math.round((date - localDate(today)) / 86400000);
+    return el("div", { class: "agenda-row", tabindex: "0", onclick: () => openDrawer(item.id), onkeydown: e => { if (e.key === "Enter") openDrawer(item.id); } },
+      el("div", {}, el("div", { class: "date", text: item.next_date.slice(5) }), el("div", { class: "dow", text: WEEKDAYS[date.getDay()] })),
+      el("div", {}, el("div", { class: "who" }, item.company, el("span", { class: "tag", text: state.stages[item.stage] || item.stage })),
+        el("div", { class: "what", text: item.next_event || item.title })),
+      el("div", { class: "left", text: left === 0 ? "今天" : `还有 ${left} 天` }));
+  }));
+}
+
+function renderTable() {
+  const rows = filtered();
+  const body = document.getElementById("rows");
+  if (!rows.length) {
+    body.replaceChildren(el("tr", {}, el("td", { colspan: "8", class: "empty", text: state.items.length ? "没有符合筛选的申请" : "还没有申请记录。用 AIHawk 投递后会出现在这里。" })));
+    return;
+  }
+  body.replaceChildren(...rows.map(item => el("tr", { tabindex: "0", onclick: () => openDrawer(item.id), onkeydown: e => { if (e.key === "Enter") openDrawer(item.id); } },
+    el("td", { class: "num", text: fmtDate(item) }),
+    el("td", { class: "co", text: item.company }),
+    el("td", { text: item.title }),
+    el("td", { class: "muted", text: item.site }),
+    el("td", { class: "result" }, item.result_words, item.result === "submitted" || item.result === "unconfirmed" ? null : el("div", { class: "muted", text: item.reason_words })),
+    el("td", {}, el("span", { class: "stage" }, swatch(item.group), state.stages[item.stage] || item.stage)),
+    el("td", { class: "num", text: typeof item.score === "number" ? item.score.toFixed(1) : "—" }),
+    el("td", {}, item.next_date ? el("span", { class: "num", text: item.next_date.slice(5) + " " }) : null, item.next_event || (item.next_date ? "" : "—")))));
+}
+
+// ---------- detail drawer ----------
+const drawer = document.getElementById("drawer");
+const backdrop = document.getElementById("backdrop");
+
+async function openDrawer(id) {
+  const item = state.items.find(entry => entry.id === id);
+  if (!item) return;
+  state.openId = id;
+  hideTip();
+  const links = [["职位链接", item.url], ["提交后的页面", item.final_url]]
+    .map(([name, url]) => [name, safeHref(url)]).filter(([, url]) => url)
+    .map(([name, url]) => el("a", { href: url, target: "_blank", rel: "noopener noreferrer", text: `${name} ↗` }));
+  const stageSelect = el("select", { id: "f-stage" }, ...Object.entries(state.stages).map(([key, name]) =>
+    el("option", { value: key, selected: key === item.stage, text: name })));
+  const dateInput = el("input", { id: "f-date", type: "date", value: item.next_date || "" });
+  const eventInput = el("input", { id: "f-event", type: "text", maxlength: "200", value: item.next_event || "", placeholder: "例如：第一轮面试、Case Study" });
+  const notes = el("textarea", { id: "f-notes", maxlength: "10000", placeholder: "联系人、面试问题、薪资沟通…" });
+  notes.value = item.notes || "";
+  const status = el("span", { class: "saved", "aria-live": "polite" });
+  const save = el("button", { class: "btn primary", type: "button", text: "保存" });
+  save.addEventListener("click", async () => {
+    save.disabled = true;
+    status.className = "saved";
+    status.textContent = "保存中…";
+    try {
+      const response = await fetch(`/api/job?id=${encodeURIComponent(id)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stage: stageSelect.value, next_date: dateInput.value, next_event: eventInput.value, notes: notes.value }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || response.status);
+      state.items = state.items.map(entry => entry.id === id ? body : entry);
+      render();
+      status.textContent = "已保存";
+    } catch (error) {
+      status.className = "err";
+      status.textContent = `没有保存：${error.message}`;
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  const description = el("div", { class: "text-block", text: "读取中…" });
+  const filled = el("div", { class: "text-block" });
+  const pageText = el("div", { class: "text-block" });
+  const facts = [
+    ["投递时间", fmtDateTime(item)],
+    ["网站", item.site],
+    ["AIHawk 结果", item.result_words + (item.reason_words && !["submitted", "unconfirmed"].includes(item.result) ? `：${item.reason_words}` : "")],
+    ["页面反馈", item.evidence || "—"],
+    ["地点", item.location || "—"],
+    ["匹配分", typeof item.score === "number" ? `${item.score.toFixed(1)} / 5` : "—"],
+    ["花费", money(item.cost)],
+  ];
+  const shotUrl = `/api/proof?id=${encodeURIComponent(id)}`;
+  drawer.replaceChildren(
+    el("div", { class: "drawer-head" },
+      el("div", {}, el("h2", { id: "d-title", text: item.title }), el("div", { class: "muted", text: [item.company, item.location].filter(Boolean).join(" · ") })),
+      el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
+    links.length ? el("div", { class: "links" }, ...links) : null,
+    el("dl", { class: "facts" }, ...facts.flatMap(([name, value]) => [el("dt", { text: name }), el("dd", { text: value })])),
+    el("h3", { text: "跟进" }),
+    el("div", { class: "form" },
+      el("label", {}, "状态", stageSelect),
+      el("label", {}, "下一步日期", dateInput),
+      el("label", { class: "full" }, "下一步事项", eventInput),
+      el("label", { class: "full" }, "备注", notes),
+      el("div", { class: "form-actions full" }, save, status)),
+    el("h3", { text: "职位描述" }),
+    description,
+    item.has_screenshot ? el("h3", { text: "提交后的页面截图" }) : null,
+    item.has_screenshot ? el("a", { class: "shot", href: shotUrl, target: "_blank", rel: "noopener" }, el("img", { src: shotUrl, alt: "提交后的页面截图", loading: "lazy" })) : null,
+    el("details", {}, el("summary", { text: "AIHawk 填写的内容" }), filled),
+    el("details", {}, el("summary", { text: "提交后页面的文字" }), pageText),
+  );
+  drawer.hidden = false;
+  backdrop.hidden = false;
+  history.replaceState(null, "", `#job=${encodeURIComponent(id)}`);
+  drawer.scrollTop = 0;
+  drawer.querySelector("button").focus();
+
+  try {
+    const response = await fetch(`/api/job?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    if (state.openId !== id) return;
+    description.textContent = body.description || "这个职位没有描述。";
+    filled.textContent = body.filled || "—";
+    pageText.textContent = body.page_text || "—";
+  } catch (error) {
+    description.replaceChildren(el("span", { class: "err", text: `读取失败：${error.message}` }));
+  }
+}
+function closeDrawer() {
+  state.openId = null;
+  drawer.hidden = true;
+  backdrop.hidden = true;
+  history.replaceState(null, "", location.pathname);
+}
+backdrop.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !drawer.hidden) closeDrawer(); });
+
+// ---------- wiring ----------
+document.getElementById("search").addEventListener("input", e => { state.search = e.target.value; renderChips(); renderTable(); });
+document.getElementById("refresh").addEventListener("click", load);
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDaily, 150); });
+setInterval(() => { if (!document.hidden) load(); }, 30000);
+load();
+</script>
+</body>
+</html>
