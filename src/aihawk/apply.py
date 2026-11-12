@@ -12,6 +12,7 @@ import ctypes.util
 import hashlib
 import json
 import os
+import platform
 import re
 import sys
 import time
@@ -58,6 +59,8 @@ REFUSED_BY_FORM = "refused_by_form"
 NEVER_CLICKED = "never_clicked"
 DRY_RUN = "dry_run"
 FORM_NOT_LOADED = "form_not_loaded"
+BROWSER_DID_NOT_OPEN = "browser_did_not_open"
+BROWSER_NOT_READY = "browser_not_ready"
 # Why a job was not sent, in a person's words: for the line after each application and for the list of what was sent. One place,
 # so the two never say it differently. A reason that is not here is an error's name (the AI service's), or a stop the model chose.
 WHY_NOT_SENT = {
@@ -71,15 +74,25 @@ WHY_NOT_SENT = {
     MAILBOX_SIGNED_OUT: "your mailbox is not signed in",
     NEVER_CLICKED: "the send button did not respond",
     FORM_NOT_LOADED: "the form did not load",
+    BROWSER_DID_NOT_OPEN: "the browser did not open",
+    BROWSER_NOT_READY: "the browser took too long to start",
     REFUSED_BY_FORM: "the form refused it",
     DRY_RUN: "it was a trial, nothing is sent",
     "other": "the form could not be filled",
     "no_credit": "your OrcaRouter credit is finished: add credit at orcarouter.ai",
+    "free_calls_used": "the free calls for today are used up: add credit at orcarouter.ai",
+    "key_limit": "this key's own limit is used up: raise it at orcarouter.ai",
+    "spend_limit": "this key reached its spending limit for now",
+    "budget": "your OrcaRouter budget for this month is used up",
+    "model_not_allowed": "this key is not allowed to use the models AIHawk needs",
+    "refused_other": "OrcaRouter refused this key for the request",
+    "no_browser_here": "the browser has no version for this computer",
     "no_display": "the browser needs a desktop",
     "browser_libraries": "the browser needs a few system packages",
 }
 
 PLATFORM = sys.platform
+MACHINE = platform.machine()
 # What the browser needs on Linux, which the person is told when it is missing: the first line is for Ubuntu 24.04, whose
 # libraries have a t64 in their names, and the second for Debian and the Ubuntus before it. Both checked with apt on 2026-11-12.
 APT_LINE = (
@@ -88,9 +101,23 @@ APT_LINE = (
 )
 
 
+def no_browser_here() -> str:
+    """What to tell a person whose computer the browser has no version for; empty when it has one. The engine is built for
+    Windows and for Linux on x86-64: on a Mac, or a Linux of another kind, AIHawk finds and scores the jobs and cannot
+    send an application."""
+    if PLATFORM == "darwin":
+        return "On a Mac AIHawk finds and scores jobs, but cannot send applications yet: its browser has no Mac version."
+    if PLATFORM.startswith("linux") and MACHINE.lower() not in ("x86_64", "amd64"):
+        return "On this computer AIHawk finds and scores jobs, but cannot send applications yet: its browser has no version for it."
+    return ""
+
+
 def missing_for_the_browser() -> tuple[str, str] | None:
-    """On Linux the browser opens a window: with no desktop, or without the libraries a window needs, it cannot, and trying
-    would only wait for a download and then fail. The reason, and what to tell the person; None when it can open."""
+    """Why the browser cannot open here, and what to tell the person; None when it can. It has no version for some
+    computers. On Linux it opens a window: with no desktop, or without the libraries a window needs, it cannot, and trying
+    would only wait for a download and then fail."""
+    if words := no_browser_here():
+        return "no_browser_here", words
     if not PLATFORM.startswith("linux"):
         return None
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
@@ -265,6 +292,9 @@ class Outcome:
     reason: str = ""
     # How many turns the model took on the form.
     steps: int = 0
+    # The fields the page's own validation refused, each with its message, when the form stayed as it was after the click for
+    # that reason: the form goes back to the model once with them.
+    invalid: str = ""
 
     @property
     def needs_mail(self) -> bool:
@@ -320,6 +350,36 @@ def _keep_latest_picture(messages: list[Any]) -> None:
     for message in messages:
         if message.get("role") == "user" and isinstance(message.get("content"), list):
             message["content"] = "A picture of the page was taken here; the latest one is below."
+
+
+# What the page-reading tools answer (a snapshot, the page's text or HTML, a script's result) can run to tens of thousands of
+# characters, and every later request carries every earlier one again: most of a long form's tokens. A reading over
+# LARGE_READING characters is kept whole while it is one of the latest READINGS_WHOLE; the older ones are cut to their start.
+# The cut is made in batches, only once READINGS_BATCH more than that are whole, because the AI service reuses the part of a request
+# that is the same as the one before and an old message changed makes it work again from there on: one cut per few steps, not per step.
+# What a small answer holds, the first request and the system message are never touched. Off, the history grows as it always did.
+# On real forms the readings that matter are 3,000 to 25,000 characters and the answers to a click or a typed field under 500, so
+# 2000 separates them; a form has four to seven of the large ones, and with a batch of one the cut falls on the fourth.
+# Off: measured on 2026-11-12 on three vendors' test postings, the forms were filled as well with it, and a request carried
+# about a fifth less, but the service's charge for a form did not fall (95% of a request is reused from the one before, and
+# each cut ends that), and steps and seconds moved within what two runs of the same form differ by.
+TRIM_READINGS = False
+LARGE_READING = 2000
+READINGS_WHOLE = 2
+READINGS_BATCH = 1
+READING_HEAD = 400
+EARLIER_READING = "\n[An earlier reading, cut to its start to keep this conversation short. Read the page again if you need it.]"
+
+
+def _trim_readings(messages: list[Any]) -> None:
+    """The older large page readings cut to their start, once enough of them are whole; the latest ones and every small answer stay."""
+    if not TRIM_READINGS:
+        return
+    whole = [message for message in messages if message.get("role") == "tool" and len(message.get("content") or "") > LARGE_READING]
+    if len(whole) <= READINGS_WHOLE + READINGS_BATCH:
+        return
+    for message in whole[:-READINGS_WHOLE]:
+        message["content"] = message["content"][:READING_HEAD] + EARLIER_READING
 
 
 def _blocked(summary: str, reason: str, steps: int) -> Report:
@@ -459,6 +519,7 @@ async def fill_form(session: Browser, tools: list[dict[str, Any]], client: Async
             seen += pictures
             messages.append({"role": "tool", "tool_call_id": call.id, "content": tool_text(result) or "Done: what it shows comes next."})
             watch.saw(name, arguments, tool_text(result), "".join(part["image_url"]["url"] for part in pictures))
+        _trim_readings(messages)
         why, warning = await watch.after(client, model)
         if why:
             return _blocked(why, STUCK, watch.turns)
@@ -507,6 +568,27 @@ async def _read_result(session: Browser, client: AsyncOpenAI, model: str, guidan
     return text, await patiently(lambda: structured(client, model, verify_system(guidance), f"The page's address: {address}\n\n{text}", "submit_outcome", VERIFY_SCHEMA))
 
 
+# The fields a browser's own validation holds back, with the label a person reads and the message it gives. A form that failed to
+# send for this stays as it was and says nothing in its text, which the page's text alone cannot tell from a send in progress.
+INVALID_FIELDS = """(() => Array.from(document.querySelectorAll(':invalid'))
+  .filter(el => !['FORM', 'FIELDSET'].includes(el.tagName))
+  .slice(0, 6)
+  .map(el => {
+    const label = (el.labels && el.labels[0] && el.labels[0].innerText) || el.getAttribute('aria-label') || el.placeholder || el.name || el.id;
+    const name = String(label).replace(/\\u2731/g, '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+    return name + ' (' + String(el.validationMessage).replace(/\\s+/g, ' ').trim().slice(0, 80) + ')';
+  }))()"""
+
+
+async def _invalid_fields(session: Browser) -> str:
+    """The fields the page's own validation refuses, as "Name (Please fill out this field); ..."; empty when there are none or the page cannot say."""
+    try:
+        fields = json.loads(tool_text(await session.call_tool("browser_evaluate", {"expression": INVALID_FIELDS})))
+    except Exception:  # noqa: BLE001  A page that cannot be asked leaves the verdict as it was.
+        return ""
+    return "; ".join(field for field in fields if isinstance(field, str)) if isinstance(fields, list) else ""
+
+
 async def submit_and_verify(session: Browser, client: AsyncOpenAI, model: str, selector: str, summary: str, guidance: str, shot: Path) -> Outcome:
     at = datetime.now(UTC).isoformat(timespec="seconds")
     before = None
@@ -524,6 +606,7 @@ async def submit_and_verify(session: Browser, client: AsyncOpenAI, model: str, s
             never_clicked = NOT_CLICKED in tool_text(click)
     except Exception as error:  # noqa: BLE001
         summary = f"{summary}\nThe click answered: {error}"
+    clicked_on = before
     text, verdict, address = "", {}, ""
     for _ in range(SEND_READS):
         page = await _settled(session, before)
@@ -550,6 +633,9 @@ async def submit_and_verify(session: Browser, client: AsyncOpenAI, model: str, s
     if never_clicked:
         # On Breezy a hidden button was the one the selector found: the form was filled and nothing left it.
         return Outcome("blocked", f"{summary}\nThe send control was never clicked, so nothing was sent.", proof, reason=NEVER_CLICKED)
+    # The page stayed as it was through the whole wait, so it was not sending: if its own validation holds fields back, that is why.
+    if verdict["outcome"] == "unknown" and page == clicked_on and (invalid := await _invalid_fields(session)):
+        return Outcome("refused", f"the form refused it: {invalid}", proof, reason=REFUSED_BY_FORM, invalid=invalid)
     # It was clicked and may have gone: this must never be retried as if it had not.
     return Outcome("unconfirmed", f"{summary}\nClicked, not confirmed by the page: {verdict['evidence']}", proof=proof)
 
@@ -621,7 +707,22 @@ async def run_on_page(
         summary = f"Dry run ({DRY_RUN_ENV} is set): filled, send control {report.submit_selector} found, nothing sent.\n{report.summary}"
         return Outcome("blocked", summary, proof, made_account=report.made_account, reason=DRY_RUN, steps=report.steps)
     sent = await submit_and_verify(session, client, model, report.submit_selector, report.summary, guidance, shot)
-    return replace(sent, made_account=report.made_account, steps=report.steps)
+    if sent.invalid:
+        # Nothing was sent, and the page says which fields it wants: the model gets one more turn on the form, then one more try.
+        refusal = (
+            f"{brief}\n\nYou filled this form and clicked send, but the page's own validation refused it: {sent.invalid}. Fix those "
+            "fields, then call finish_form again. A field that would need a fact about the candidate that the CV and the answers do "
+            "not give ends the form as blocked, with that field named."
+        )
+        again = await fill_form(session, tools, client, model, refusal, guidance, page_rules)
+        report = replace(again, steps=report.steps + again.steps, made_account=report.made_account or again.made_account)
+        if tracing:
+            traced.note(f"== finish_form again: {json.dumps(asdict(report), ensure_ascii=False)[:500]}")
+        if report.status != "ready" or not report.submit_selector:
+            reason = "other" if report.blocked_by in ("", "none") else report.blocked_by
+            return replace(sent, status="blocked", summary=report.summary, reason=reason, made_account=report.made_account, steps=report.steps, invalid="")
+        sent = await submit_and_verify(session, client, model, report.submit_selector, report.summary, guidance, shot)
+    return replace(sent, made_account=report.made_account, steps=report.steps, invalid="")
 
 
 def getting_the_browser(answer: str) -> str:
@@ -669,6 +770,16 @@ async def patiently(call: Callable[[], Awaitable[Any]]) -> Any:
                 note("")
 
 
+class BrowserDidNotOpen(RuntimeError):
+    """The browser could not be opened. `reason` is the short name telemetry counts and the list of applications turns into
+    words (BROWSER_DID_NOT_OPEN, BROWSER_NOT_READY); the message keeps the server's own text, which goes to errors.log and
+    nowhere else: it can hold paths on the person's computer."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 async def _open_browser(session: Browser, profile: Path) -> None:
     # While the engine downloads, the server answers with its progress instead of a browser. Its words are its own to
     # change: the browser is ready when it can go to a page, and an action on one that is not open is an error.
@@ -677,14 +788,14 @@ async def _open_browser(session: Browser, profile: Path) -> None:
     while True:
         result = await session.call_tool("browser_open", {"profile": str(profile)})
         if result.isError:
-            raise RuntimeError(f"the browser did not open: {tool_text(result)}")
+            raise BrowserDidNotOpen(BROWSER_DID_NOT_OPEN, f"the browser did not open: {tool_text(result)}")
         ready = await session.call_tool("browser_navigate", {"url": "about:blank"})
         if not ready.isError:
             if told := NOTE.get():
                 told("")
             return
         if time.monotonic() > deadline:
-            raise RuntimeError(f"the browser was not ready in time: {tool_text(result)}")
+            raise BrowserDidNotOpen(BROWSER_NOT_READY, f"the browser was not ready in time: {tool_text(result)}")
         if (note := NOTE.get()) and (words := getting_the_browser(tool_text(result))):
             note(words)
         await asyncio.sleep(OPEN_RETRY_S)

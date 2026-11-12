@@ -14,12 +14,12 @@ from pathlib import Path
 from openai import AsyncOpenAI
 
 from aihawk import errors
-from aihawk.apply import MAILBOXES, NOTE, Outcome, apply_to_job, signed_in, site_of
+from aihawk.apply import MAILBOXES, NOTE, BrowserDidNotOpen, Outcome, apply_to_job, no_browser_here, signed_in, site_of
 from aihawk.apply import sign_in as sign_in_browser
 from aihawk.config import DEFAULT_BASE_URL, KEY_ENV, Config, ConfigError, load_config
 from aihawk.database import load_manifest, search
 from aihawk.library import Library
-from aihawk.llm import SPEND, Mark, make_client, no_credit, not_answering, refused
+from aihawk.llm import ACCOUNT_CAUSES, SPEND, Mark, cause, make_client, no_credit, not_answering, refused
 from aihawk.plugins import Plugin, always_plugins, load_plugins, plugin_for
 from aihawk.profile import CV_NAME_FILE, ensure_account_password, import_answers_file, install_resume, save_setting
 from aihawk.scoring import NOT_JUDGED, NotAnswering, fits, question, score
@@ -34,6 +34,9 @@ WIDE = 200
 
 Log = Callable[[str], None]
 
+
+# OrcaRouter's balance page, under the API's address: {"success": true, "data": {"wallet_usd": …, "spendable_usd": …}}.
+BALANCE_PATH = "/tools/balance"
 
 class Session:
     def __init__(self, workspace: Path) -> None:
@@ -53,6 +56,9 @@ class Session:
         self.database_jobs = 0
         # The browser's engine coming down in the background, while the person looks at the jobs.
         self.engine: subprocess.Popen[bytes] | None = None
+        # How many browsers of this session are open or being opened (applications, a mailbox sign-in): while there is one, the
+        # engine is not brought in the background. See bring_engine.
+        self.browsers = 0
 
     def close(self) -> None:
         # The downloads are AIHawk's: they do not go on when AIHawk is closed.
@@ -74,8 +80,13 @@ class Session:
     def bring_engine(self) -> None:
         """Starts bringing the browser's engine here, about 270 MB, silently and once, so that the first application does not wait
         for it. It is the engine's own `fetch`, in a process of its own that ends with AIHawk; a failure is no one's concern:
-        the application that needs the engine asks for it again."""
-        if self.engine is not None or self.engine_here():
+        the application that needs the engine asks for it again.
+
+        Never while a browser is open or being opened: its server downloads the engine itself when it is not here, and a second
+        download of the same engine ends by clearing the folder the first one is starting the browser from (the core removes the
+        engine's folder and moves its own copy in, and on Windows it deletes what is not in use). The jobs finishing in the middle
+        of the first application is how that happened on 2026-11-12. The application downloads it, so nothing is lost."""
+        if self.engine is not None or self.browsers or no_browser_here() or self.engine_here():
             return
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:
@@ -133,6 +144,24 @@ class Session:
             return not refused(error)
         return True
 
+    async def credit_left(self, key: str) -> float | None:
+        """The dollars this key can still spend at OrcaRouter, as its balance page says (`spendable_usd`: the account's credit,
+        or the key's own limit when that is lower); None when that cannot be told: no connection, an answer of another shape, a
+        refusal. Only a number says anything, and the check never blocks. Not the OpenAI-shaped billing page: for a key with no
+        limit of its own, which is how OrcaRouter makes them, it says 100000000 dollars whatever the account holds."""
+        try:
+            answer = await self.key_client(key).get(BALANCE_PATH, cast_to=dict)
+        except Exception:  # noqa: BLE001  Not knowing is not a reason to stop anyone; the first call tells.
+            return None
+        data = answer.get("data") if isinstance(answer, dict) else None
+        left = data.get("spendable_usd") if isinstance(data, dict) else None
+        return float(left) if isinstance(left, int | float) and not isinstance(left, bool) else None
+
+    async def has_no_credit(self, key: str) -> bool:
+        """Whether the service says this key's account has none left."""
+        left = await self.credit_left(key)
+        return left is not None and left <= 0
+
     def needs_resume(self) -> bool:
         return not self.config.cv.is_file() or not self.config.filters.include
 
@@ -157,7 +186,12 @@ class Session:
     async def sign_in_mail(self, provider: str, wait: Callable[[], Awaitable[None]]) -> bool:
         """The mailbox open in the browser for the person to sign in, until `wait` returns; whether the inbox was reached."""
         url, _ = MAILBOXES[provider]
-        where = await sign_in_browser(self.config.browser_profile, self.config.data_dir / "browser", wait, url)
+        self.browsers += 1
+        try:
+            await self.engine_coming(NOTE.get())
+            where = await sign_in_browser(self.config.browser_profile, self.config.data_dir / "browser", wait, url)
+        finally:
+            self.browsers -= 1
         return signed_in(provider, where)
 
     async def sync(self, progress: Callable[[int, int], None], arrived: Callable[[], None], on_bytes: Callable[[int, int], None] = lambda done, total: None) -> None:
@@ -248,8 +282,9 @@ class Session:
             outcome = await self.apply(item, log, note)
             results.append((item, outcome))
             done(item, outcome)
-            if outcome.reason == "no_credit":
-                # Every application after this one would fail the same way, after the browser opened for nothing.
+            if outcome.reason in ACCOUNT_CAUSES:
+                # The account or the key stopped it: every application after this one would fail the same way, after the
+                # browser opened for nothing.
                 break
         return results
 
@@ -270,6 +305,8 @@ class Session:
         mark = SPEND.mark()
         started = time.monotonic()
         told = NOTE.set(note)
+        # Counted before the wait for the engine, so that the engine is either already coming (waited for) or not started.
+        self.browsers += 1
         try:
             await self.engine_coming(note)
             cv_file = self._own_cv()
@@ -279,8 +316,9 @@ class Session:
             # One job's failure is reported and recorded; the next job still runs.
             if refused(error):
                 raise
-            outcome = Outcome("failed", errors.explained(error), reason="no_credit" if no_credit(error) else type(error).__name__)
+            outcome = Outcome("failed", errors.explained(error), reason=_why_failed(error))
         finally:
+            self.browsers -= 1
             NOTE.reset(told)
         used = await self._record(item, host, outcome, mark)
         # How it went, for AIHawk's makers, with nothing about the person or the job: see telemetry.py. The tokens each
@@ -307,6 +345,18 @@ class Session:
         cost, used = SPEND.since(mark)
         self.store.set_cost(item.job.id, cost)
         return used
+
+
+def _why_failed(error: Exception) -> str:
+    """Why an application ended in an error, in one word for the list and for telemetry: the account's cause when the AI service
+    refused for it, the name the browser's failure carries, else the error's class. Never the error's text."""
+    if no_credit(error):
+        return "no_credit"
+    if why := cause(error):
+        return why
+    if isinstance(error, BrowserDidNotOpen):
+        return error.reason
+    return type(error).__name__
 
 
 def _guidance(plugin: Plugin | None, everywhere: tuple[Plugin, ...]) -> str:

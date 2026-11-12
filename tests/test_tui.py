@@ -15,7 +15,7 @@ import duckdb
 import httpx
 import pytest
 from click.testing import CliRunner
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, InternalServerError, RateLimitError
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AuthenticationError, InternalServerError, PermissionDeniedError, RateLimitError
 from pypdf import PdfWriter
 from textual.widgets import DataTable, Input, RichLog, Static
 
@@ -28,7 +28,7 @@ from aihawk.cli import main as cli_main
 from aihawk.config import Config, ConfigError, load_config
 from aihawk.database import Job
 from aihawk.library import Library
-from aihawk.llm import explain
+from aihawk.llm import cause, error_name, explain, refused
 from aihawk.profile import import_answers_file, install_resume, read_resume
 from aihawk.screens import Confirm, JobDetails, Said, SendBatch, SentDetails, SentList, Settings, SignIn, StopSending, TextPrompt
 from aihawk.session import Session
@@ -339,6 +339,29 @@ def test_escape_on_the_batch_sends_none_and_the_selection_stays(home: Path, resu
             await wait_for_apply(pilot, app)
             assert app.selected == {"https://jobs.lever.co/beta/2"}, "a job is known by its address"
             assert str(app.query_one(DataTable).get_row_at(0)[0]) == "●"
+
+    asyncio.run(run())
+    assert calls == []
+
+
+def test_on_a_mac_the_start_says_applying_does_not_work_and_a_sends_nothing(
+    home: Path, resume: Path, restored_apply: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import aihawk.apply as apply_module
+
+    monkeypatch.setattr(apply_module, "PLATFORM", "darwin")
+    calls: list[Any] = []
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        fake_apply(app, [Outcome("submitted", "sent")], calls)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await settle(pilot, app)
+            assert "On a Mac AIHawk finds and scores jobs" in " ".join(app.query_one(Said).said)
+            assert companies(app)[0] == "Bestco", "the jobs are found and scored all the same"
+            await pilot.press("a")
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, SendBatch)
 
     asyncio.run(run())
     assert calls == []
@@ -675,8 +698,8 @@ async def wait_for_sign_in_to_close(pilot: Any, app: AIHawk) -> None:
 REQUEST = httpx.Request("POST", "https://api.orcarouter.ai/v1/chat/completions")
 
 
-def status_error(kind: type, code: int) -> Exception:
-    return kind(f"Error code: {code}", response=httpx.Response(code, request=REQUEST), body=None)
+def status_error(kind: type, code: int, body: Any = None) -> Exception:
+    return kind(f"Error code: {code}", response=httpx.Response(code, request=REQUEST), body=body)
 
 
 class RefusingModel:
@@ -967,19 +990,42 @@ def test_a_site_with_no_plugin_is_tried_like_any_other(home: Path, resume: Path,
     session.close()
 
 
-def test_after_the_resume_the_mail_is_asked_once_and_gmail_is_opened_until_the_inbox_shows(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The question comes right after the resume, in the same voice as the key: the address, then the mailbox open in the browser.
+NO_MAIL = Outcome("blocked", "the mailbox is not signed in", reason="mailbox_signed_out")
+
+
+async def apply_to_the_first_job(pilot: Any, app: AIHawk, outcomes: list[Outcome], calls: list[Any] | None = None) -> None:
+    """The first job selected and sent with scripted outcomes, up to the first question the sending asks."""
+    fake_apply(app, outcomes, [] if calls is None else calls)
+    await settle(pilot, app)
+    await pilot.press("space", "a")
+    await wait_for_screen(pilot, SendBatch)
+    await pilot.press("enter")
+    await wait_for_screen(pilot, TextPrompt)
+
+
+def steps_sent(tracked: list[dict[str, Any]]) -> list[str]:
+    return [event["properties"]["step"] for event in tracked if event["event"] == "start_step"]
+
+
+def test_the_mail_is_not_asked_at_the_start_and_is_asked_at_the_first_application_that_needs_a_code_and_that_one_is_sent_again(
+    home: Path, resume: Path, restored_apply: Any, tracked: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = Store(home / "data" / "jobs.db")
     store.set_answer("mail_provider", "")
     store.close()
     server = ScriptedServer(page={"url": "https://mail.google.com/mail/u/0/#inbox", "text": "Inbox"})
     scripted_server(monkeypatch, server)
+    calls: list[Any] = []
 
     async def run() -> None:
         app = scripted_app(home, resume)
         async with app.run_test(size=(140, 40)) as pilot:
             await settle(pilot, app)
-            assert isinstance(app.screen, TextPrompt) and "Which email do you apply with" in app.screen.question
+            # The jobs are on the screen and nothing was asked about the mail.
+            assert not isinstance(app.screen, TextPrompt) and companies(app) == ["Bestco", "Lowly", "Noplugin"]
+            assert not {"mail_asked", "mail_ready", "mail_later"} & set(steps_sent(tracked))
+            await apply_to_the_first_job(pilot, app, [NO_MAIL, Outcome("submitted", "sent")], calls)
+            assert app.screen.question == "A site sent a code to your email. Which email is it, so AIHawk can read it?"
             assert app.screen.query_one(Input).value == "ada@example.com"
             app.screen.query_one(Input).value = "ada@gmail.com"
             await pilot.press("enter")
@@ -987,33 +1033,131 @@ def test_after_the_resume_the_mail_is_asked_once_and_gmail_is_opened_until_the_i
             assert "The browser opened Gmail" in app.screen.text and "ada@gmail.com" in app.screen.text
             assert ("browser_navigate", {"url": "https://mail.google.com/mail/u/0/"}) in server.calls
             await pilot.press("enter")
-            await wait_for_sign_in_to_close(pilot, app)
-            await settle(pilot, app)
-            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
+            await wait_for_apply(pilot, app)
+            assert str(app.query_one(DataTable).get_row_at(0)[0]) == "✓"
 
     asyncio.run(run())
     assert server.calls[-1] == ("browser_close", {})
+    assert [call["job"].company for call in calls] == ["Bestco", "Bestco"]
     answers = answers_of(load_config(home))
     assert answers["email"] == "ada@gmail.com" and answers["mail_provider"] == "gmail"
+    assert [step for step in steps_sent(tracked) if step.startswith("mail")] == ["mail_asked", "mail_ready"]
 
 
-def test_the_mail_question_left_with_escape_is_not_asked_again_at_the_next_start(home: Path, resume: Path) -> None:
+def test_the_mail_left_for_later_is_not_asked_again_by_the_next_application_of_the_same_run(
+    home: Path, resume: Path, restored_apply: Any, tracked: list[dict[str, Any]]
+) -> None:
+    store = Store(home / "data" / "jobs.db")
+    store.set_answer("mail_provider", "")
+    store.close()
+    calls: list[Any] = []
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await apply_to_the_first_job(pilot, app, [NO_MAIL, NO_MAIL], calls)
+            await pilot.press("escape")
+            await wait_for_apply(pilot, app)
+            assert "Mail left for later: e, then Your mail." in app.query_one(Said).said
+            assert app.session.mail()[1] == "later" and len(calls) == 1
+            # The next application that needs a code says so and goes on: there is no second question in this run.
+            await pilot.press("space", "a")
+            await wait_for_screen(pilot, SendBatch)
+            await pilot.press("enter")
+            await wait_for_apply(pilot, app)
+            assert not isinstance(app.screen, TextPrompt) and len(calls) == 2
+            assert app.query_one(Said).said.count("Mail left for later: e, then Your mail.") == 2
+
+    asyncio.run(run())
+    assert [step for step in steps_sent(tracked) if step.startswith("mail")] == ["mail_asked", "mail_later"]
+
+
+def test_the_mail_question_is_plain_and_an_address_that_is_neither_gmail_nor_outlook_is_asked_once_then_left(
+    home: Path, resume: Path, restored_apply: Any
+) -> None:
     store = Store(home / "data" / "jobs.db")
     store.set_answer("mail_provider", "")
     store.close()
 
     async def run() -> None:
         app = scripted_app(home, resume)
-        async with app.run_test(size=(140, 40)) as pilot:
-            await settle(pilot, app)
-            assert isinstance(app.screen, TextPrompt) and "Which email do you apply with" in app.screen.question
-            await pilot.press("escape")
-            await settle(pilot, app)
-            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
-            assert ("mail", "Your mail", "not set up") in app.setting_rows()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await apply_to_the_first_job(pilot, app, [NO_MAIL])
+            assert app.screen.question == "A site sent a code to your email. Which email is it, so AIHawk can read it?"
+            assert str(app.screen.query_one(".hint", Static).content) == "AIHawk opens that inbox in its browser only to read those codes · Enter · Esc later"
+            app.screen.query_one(Input).value = "ada@yahoo.com"
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            assert app.screen.question == "Where is ada@yahoo.com?"
+            app.screen.query_one(Input).value = "yahoo"
+            await pilot.press("enter")
+            await wait_for_apply(pilot, app)
+            await pilot.pause(0.2)
+            # Said once, and left for later: it is not asked again.
+            assert not isinstance(app.screen, TextPrompt)
+            assert app.query_one(Said).said.count("Only Gmail and Outlook can be read for now; the rest works without.") == 1
+            assert app.session.mail()[1] == "later"
 
     asyncio.run(run())
-    assert answers_of(load_config(home))["mail_provider"] == "later"
+
+
+def test_a_mailbox_that_still_shows_its_sign_in_page_is_a_question_with_no_empty_input(
+    home: Path, resume: Path, restored_apply: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Store(home / "data" / "jobs.db")
+    store.set_answer("mail_provider", "")
+    store.close()
+    server = ScriptedServer(page={"url": "https://accounts.google.com/signin", "text": "Sign in"})
+
+    async def stuck(name: str, arguments: dict[str, Any] | None = None) -> Any:
+        server.calls.append((name, arguments or {}))
+        return SimpleNamespace(isError=False, content=[SimpleNamespace(text="ok")])
+
+    server.call_tool = stuck  # type: ignore[method-assign]
+    scripted_server(monkeypatch, server)
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await apply_to_the_first_job(pilot, app, [NO_MAIL])
+            app.screen.query_one(Input).value = "ada@gmail.com"
+            await pilot.press("enter")
+            await wait_for_screen(pilot, SignIn)
+            assert app.screen.text == "The browser opened Gmail. Sign in as ada@gmail.com, then come back to this window and press Enter."
+            await pilot.press("enter")
+            await wait_for_screen(pilot, Confirm)
+            assert app.screen.question == "Gmail still shows its sign-in page."
+            assert not list(app.screen.query(Input))
+            await pilot.press("escape")
+            await wait_for_sign_in_to_close(pilot, app)
+            await wait_for_apply(pilot, app)
+            assert "Mail left for later: e, then Your mail." in app.query_one(Said).said
+
+    asyncio.run(run())
+
+
+def test_escape_on_the_sign_in_is_later_not_done(home: Path, resume: Path, restored_apply: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = Store(home / "data" / "jobs.db")
+    store.set_answer("mail_provider", "")
+    store.close()
+    # The inbox would show if it were looked at: Escape must not count as having signed in.
+    server = ScriptedServer(page={"url": "https://mail.google.com/mail/u/0/#inbox", "text": "Inbox"})
+    scripted_server(monkeypatch, server)
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await apply_to_the_first_job(pilot, app, [NO_MAIL])
+            app.screen.query_one(Input).value = "ada@gmail.com"
+            await pilot.press("enter")
+            await wait_for_screen(pilot, SignIn)
+            await pilot.press("escape")
+            await wait_for_sign_in_to_close(pilot, app)
+            await wait_for_apply(pilot, app)
+            assert "Signed in to Gmail." not in app.query_one(Said).said
+            assert "Mail left for later: e, then Your mail." in app.query_one(Said).said
+
+    asyncio.run(run())
 
 
 def test_jev_scores_one_page_ahead_and_only_the_side_arrows_turn_the_pages(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1319,7 +1463,7 @@ def test_the_answers_the_person_sees_and_counts_leave_out_aihawks_own(home: Path
 def test_every_reason_a_form_stops_for_has_plain_words_and_an_unknown_one_does_not_blame_the_service() -> None:
     from aihawk.apply import BLOCKED_BY, WHY_NOT_SENT, why_not_sent
 
-    for reason in (*BLOCKED_BY, "stuck", "no_code", "mailbox_signed_out", "never_clicked", "form_not_loaded", "refused_by_form"):
+    for reason in (*BLOCKED_BY, "stuck", "no_code", "mailbox_signed_out", "never_clicked", "form_not_loaded", "refused_by_form", "browser_did_not_open", "browser_not_ready"):
         assert reason in WHY_NOT_SENT, reason
     assert why_not_sent("captcha") == "a captcha stopped it"
     assert why_not_sent("missing_info") == "a required answer is missing: press e, Your answers"
@@ -1566,90 +1710,6 @@ def test_the_key_prompt_says_what_orcarouter_is_that_it_costs_and_that_esc_is_al
     asyncio.run(run())
 
 
-def test_the_mail_question_is_plain_and_an_address_that_is_neither_gmail_nor_outlook_is_asked_once_then_left(home: Path, resume: Path) -> None:
-    store = Store(home / "data" / "jobs.db")
-    store.set_answer("mail_provider", "")
-    store.close()
-
-    async def run() -> None:
-        app = scripted_app(home, resume)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await settle(pilot, app)
-            assert app.screen.question == "Some job sites email a code to confirm it is you. Which email do you apply with?"
-            assert str(app.screen.query_one(".hint", Static).content) == "AIHawk opens that inbox in its browser only to read those codes · Enter · Esc later"
-            app.screen.query_one(Input).value = "ada@yahoo.com"
-            await pilot.press("enter")
-            await pilot.pause(0.3)
-            assert app.screen.question == "Where is ada@yahoo.com?"
-            app.screen.query_one(Input).value = "yahoo"
-            await pilot.press("enter")
-            await settle(pilot, app)
-            await pilot.pause(0.2)
-            # Said once, and left for later: it is not asked again.
-            assert not isinstance(app.screen, TextPrompt)
-            assert app.query_one(Said).said.count("Only Gmail and Outlook can be read for now; the rest works without.") == 1
-            assert app.session.mail()[1] == "later"
-
-    asyncio.run(run())
-
-
-def test_a_mailbox_that_still_shows_its_sign_in_page_is_a_question_with_no_empty_input(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    store = Store(home / "data" / "jobs.db")
-    store.set_answer("mail_provider", "")
-    store.close()
-    server = ScriptedServer(page={"url": "https://accounts.google.com/signin", "text": "Sign in"})
-
-    async def stuck(name: str, arguments: dict[str, Any] | None = None) -> Any:
-        server.calls.append((name, arguments or {}))
-        return SimpleNamespace(isError=False, content=[SimpleNamespace(text="ok")])
-
-    server.call_tool = stuck  # type: ignore[method-assign]
-    scripted_server(monkeypatch, server)
-
-    async def run() -> None:
-        app = scripted_app(home, resume)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await settle(pilot, app)
-            app.screen.query_one(Input).value = "ada@gmail.com"
-            await pilot.press("enter")
-            await wait_for_screen(pilot, SignIn)
-            assert app.screen.text == "The browser opened Gmail. Sign in as ada@gmail.com, then come back to this window and press Enter."
-            await pilot.press("enter")
-            await wait_for_screen(pilot, Confirm)
-            assert app.screen.question == "Gmail still shows its sign-in page."
-            assert not list(app.screen.query(Input))
-            await pilot.press("escape")
-            await wait_for_sign_in_to_close(pilot, app)
-            await settle(pilot, app)
-            assert "Mail left for later: e, then Your mail." in app.query_one(Said).said
-
-    asyncio.run(run())
-
-
-def test_escape_on_the_sign_in_is_later_not_done(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    store = Store(home / "data" / "jobs.db")
-    store.set_answer("mail_provider", "")
-    store.close()
-    # The inbox would show if it were looked at: Escape must not count as having signed in.
-    server = ScriptedServer(page={"url": "https://mail.google.com/mail/u/0/#inbox", "text": "Inbox"})
-    scripted_server(monkeypatch, server)
-
-    async def run() -> None:
-        app = scripted_app(home, resume)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await settle(pilot, app)
-            app.screen.query_one(Input).value = "ada@gmail.com"
-            await pilot.press("enter")
-            await wait_for_screen(pilot, SignIn)
-            await pilot.press("escape")
-            await wait_for_sign_in_to_close(pilot, app)
-            await settle(pilot, app)
-            assert "Signed in to Gmail." not in app.query_one(Said).said
-            assert "Mail left for later: e, then Your mail." in app.query_one(Said).said
-
-    asyncio.run(run())
-
-
 def test_the_resume_prompt_says_a_wrong_path_inside_itself_and_stays_open(home: Path, resume: Path) -> None:
     async def run() -> None:
         app = scripted_app(home, None)
@@ -1753,7 +1813,11 @@ def test_a_job_with_no_description_says_it_can_still_be_applied_to_and_the_detai
         job = Job("x", "Co", "Engineer", "Milan", "https://a.example/", "https://a.example/", "")
         async with app.run_test(size=(80, 24)) as pilot:
             await app.push_screen(JobDetails(Stored(job, "scored", 4.0, None)))
-            await pilot.pause(0.2)
+            # The footer is drawn a moment after the screen opens, later on a slow machine: waited for, not timed.
+            for _ in range(60):
+                await pilot.pause(0.05)
+                if "o Open the posting" in footer_text(app):
+                    break
             assert str(app.screen.query_one("#text Static").render()) == "This posting has no description. You can still apply: the form is filled from your resume."
             assert "o Open the posting" in footer_text(app)
 
@@ -2168,7 +2232,7 @@ def test_with_no_credit_the_jobs_stay_new_scoring_stops_and_says_what_to_do_and_
         async with app.run_test(size=(80, 24)) as pilot:
             await settle(pilot, app)
             assert model.attempts == 1, "not retried in a loop"
-            assert last_line(app) == "Your OrcaRouter credit is finished. Add credit at orcarouter.ai, then press → to go on."
+            assert last_line(app) == "Your OrcaRouter account has no credit yet. Add a few dollars at orcarouter.ai, then press → to go on."
             assert len(app.session.store.with_status("new")) == 3 and not app.session.store.with_status("passed_over")
             # The line is not covered by the count of the jobs coming, and nothing says there are no more.
             assert "No more jobs" not in logged(app) and "No jobs found" not in logged(app)
@@ -2203,7 +2267,7 @@ def test_an_application_that_fails_for_want_of_credit_says_so_and_the_batch_stop
             assert calls == ["Bestco"], "the second one was not tried"
             (item,) = app.session.store.sent()
             assert item.status == "failed" and item.reason == "no_credit"
-            assert item.note == "Your OrcaRouter credit is finished. Add credit at orcarouter.ai, then press → to go on."
+            assert item.note == "Your OrcaRouter account has no credit yet. Add a few dollars at orcarouter.ai, then press → to go on."
 
     asyncio.run(run())
 
@@ -2274,6 +2338,104 @@ def test_the_engine_is_brought_in_the_background_once_and_only_when_it_is_not_he
     assert process is not None and not process.ended  # type: ignore[attr-defined]
     session.close()
     assert process.ended  # type: ignore[attr-defined]
+
+
+def test_the_engine_is_not_brought_while_a_browser_is_open_or_opening(monkeypatch: pytest.MonkeyPatch, home: Path, resume: Path) -> None:
+    """The jobs can finish in the middle of the first application, whose server is downloading the engine itself: a second
+    download of it clears the folder the first is starting the browser from (2026-11-12, an application that failed after 98 s)."""
+    import subprocess
+
+    started: list[list[str]] = []
+
+    class Process:
+        def __init__(self, command: list[str], **keywords: Any) -> None:
+            started.append(command)
+
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", Process)
+    monkeypatch.setattr(Session, "engine_here", staticmethod(lambda: False))
+    session = Session(home)
+    session._client = ScriptedModelForApp()  # type: ignore[assignment]
+    asyncio.run(session.load_resume(resume))
+    session.store.add(Job("one", "Firm", "Python Engineer", "Milan", "https://jobs.lever.co/a/1", "https://jobs.lever.co/a/1", "A posting.", 1.0))
+    during: list[int] = []
+
+    async def fill(*_arguments: Any, **_options: Any) -> Outcome:
+        session.bring_engine()
+        during.append(len(started))
+        return Outcome("blocked", "a puzzle")
+
+    monkeypatch.setattr(session_module, "apply_to_job", fill)
+    asyncio.run(session.apply(session.store.get("one"), lambda _: None))  # type: ignore[arg-type]
+    assert during == [0] and session.engine is None and session.browsers == 0
+    session.bring_engine()
+    assert len(started) == 1, "with no browser open it is brought, as before"
+    session.close()
+
+
+def test_the_engine_is_not_brought_while_the_mailbox_browser_opens_and_it_waits_for_one_already_coming(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    import subprocess
+
+    started: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda command, **keywords: started.append(command))
+    monkeypatch.setattr(Session, "engine_here", staticmethod(lambda: False))
+    session = Session(home)
+    seen: list[tuple[int, int]] = []
+
+    async def sign_in(profile: Path, folder: Path, wait: Any, url: str) -> str:
+        session.bring_engine()
+        seen.append((len(started), session.browsers))
+        return "https://mail.google.com/mail/u/0/"
+
+    monkeypatch.setattr(session_module, "sign_in_browser", sign_in)
+    assert asyncio.run(session.sign_in_mail("gmail", lambda: asyncio.sleep(0))) is True
+    assert seen == [(0, 1)] and session.browsers == 0
+
+    class Coming:
+        polls = 0
+
+        def poll(self) -> int | None:
+            self.polls += 1
+            return None if self.polls < 3 else 0
+
+    async def real_sleep(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", real_sleep)
+    session.engine = Coming()  # type: ignore[assignment]
+    seen.clear()
+    asyncio.run(session.sign_in_mail("gmail", lambda: asyncio.sleep(0)))
+    assert session.engine.polls >= 3, "the mailbox browser opened only once the engine had come"  # type: ignore[attr-defined]
+    session.engine = None
+    session.close()
+
+
+def test_a_browser_that_did_not_open_ends_the_application_with_its_name_and_not_the_servers_words(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(home)
+    session._client = ScriptedModelForApp()  # type: ignore[assignment]
+    asyncio.run(session.load_resume(resume))
+    session.store.add(Job("one", "Firm", "Python Engineer", "Milan", "https://jobs.lever.co/a/1", "https://jobs.lever.co/a/1", "A posting.", 1.0))
+    failures: list[Exception] = [
+        apply_module.BrowserDidNotOpen("browser_did_not_open", "the browser did not open: C:/Users/someone/engine is gone"),
+        apply_module.BrowserDidNotOpen("browser_not_ready", "the browser was not ready in time: starting"),
+        RuntimeError("something else"),
+    ]
+
+    async def fail(*_arguments: Any, **_options: Any) -> Outcome:
+        raise failures.pop(0)
+
+    monkeypatch.setattr(session_module, "apply_to_job", fail)
+    outcomes = [asyncio.run(session.apply(session.store.get("one"), lambda _: None)) for _ in range(3)]  # type: ignore[arg-type]
+    assert [outcome.reason for outcome in outcomes] == ["browser_did_not_open", "browser_not_ready", "RuntimeError"]
+    assert all(outcome.status == "failed" and "someone" not in outcome.summary for outcome in outcomes)
+    assert "C:/Users/someone/engine is gone" in (session.config.data_dir / "errors.log").read_text(encoding="utf-8")
+    assert session.browsers == 0
+    session.close()
 
 
 def test_an_engine_that_cannot_be_started_is_no_ones_concern(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
@@ -2379,3 +2541,551 @@ def test_while_the_resume_is_read_the_screen_says_how_long_it_takes(home: Path, 
         assert said == ["Reading your resume: about half a minute…"]
 
     asyncio.run(run())
+
+
+# What OrcaRouter says to a refusal (https://docs.orcarouter.ai/operations/errors.md), as the SDK hands it over: the body
+# without its "error" wrapper. Every message ends with the request's id.
+def refusal(code: int, message: str, service_code: str = "", kind: type = APIStatusError) -> Exception:
+    body = {"message": f"{message} (request id: 20261112abc)", "type": "orcarouter_api_error", "code": service_code}
+    return status_error(kind, code, body)
+
+
+NO_CREDIT_WORDS = "Your OrcaRouter account has no credit yet. Add a few dollars at orcarouter.ai, then {}"
+GO_ON = "press → to go on."
+REFUSALS = [
+    (refusal(402, "insufficient quota", "insufficient_user_quota"), "no_credit", NO_CREDIT_WORDS.format(GO_ON)),
+    (status_error(APIStatusError, 402), "no_credit", NO_CREDIT_WORDS.format(GO_ON)),
+    (
+        refusal(402, "free calls used up", "free_quota_exhausted"), "free_calls_used",
+        f"The free calls for today are used up. Add credit at orcarouter.ai, then {GO_ON}",
+    ),
+    (
+        refusal(403, "token quota is not enough", "pre_consume_token_quota_failed", PermissionDeniedError), "key_limit",
+        f"This key's own limit is used up. Raise it, or make a new key, at orcarouter.ai. Then {GO_ON}",
+    ),
+    (
+        refusal(403, "token cycle spend limit reached, resets at 2026-11-13", "access_denied", PermissionDeniedError), "spend_limit",
+        f"This key reached its spending limit for now. Raise it at orcarouter.ai, or wait until it resets. Then {GO_ON}",
+    ),
+    (
+        refusal(403, "monthly budget gone", "budget_exceeded", PermissionDeniedError), "budget",
+        f"Your OrcaRouter budget for this month is used up. Then {GO_ON}",
+    ),
+    (
+        refusal(403, "This token has no access to model deepseek-v4", "", PermissionDeniedError), "model_not_allowed",
+        f"This key is not allowed to use the models AIHawk needs. Make a key with no model restriction at orcarouter.ai. Then {GO_ON}",
+    ),
+    (
+        refusal(403, "IP 1.2.3.4 is not allowed", "access_denied", PermissionDeniedError), "refused_other",
+        f"OrcaRouter refused this key for the request: IP 1.2.3.4 is not allowed. Then {GO_ON}",
+    ),
+    (status_error(PermissionDeniedError, 403), "refused_other", f"OrcaRouter refused this key for the request. Then {GO_ON}"),
+]
+
+
+@pytest.mark.parametrize(("error", "name", "words"), REFUSALS)
+def test_each_refusal_of_the_account_has_its_cause_and_its_own_words(error: Exception, name: str, words: str) -> None:
+    assert cause(error) == name
+    assert explain(error) == words
+    assert "request id" not in explain(error)
+
+
+def test_the_cause_is_read_from_a_body_with_or_without_its_wrapper_or_none_at_all() -> None:
+    inner = {"message": "token quota is not enough (request id: x)", "code": "pre_consume_token_quota_failed"}
+    assert cause(status_error(PermissionDeniedError, 403, inner)) == "key_limit"
+    assert cause(status_error(PermissionDeniedError, 403, {"error": inner})) == "key_limit"
+    # No body: the error's own text is what there is to read.
+    plain = PermissionDeniedError("Error code: 403 - token cycle spend limit reached", response=httpx.Response(403, request=REQUEST), body=None)
+    assert cause(plain) == "spend_limit"
+    assert cause(status_error(PermissionDeniedError, 403, "not json")) == "refused_other"
+    assert cause(status_error(PermissionDeniedError, 403, {"error": "text", "code": 5})) == "refused_other"
+    # Not about the account.
+    assert cause(status_error(RateLimitError, 429)) == "" and cause(status_error(AuthenticationError, 401)) == "" and cause(ValueError("x")) == ""
+
+
+def test_an_unexplained_refusal_shows_the_services_words_cut_and_without_a_key_or_a_request_id() -> None:
+    long = "not allowed from here " * 20
+    said = explain(refusal(403, long, "access_denied", PermissionDeniedError))
+    shown = said.removeprefix("OrcaRouter refused this key for the request: ").removesuffix(f" Then {GO_ON}")
+    assert len(shown) <= 121 and shown.endswith("….") and "request id" not in said
+    assert "sk-orca" not in explain(refusal(403, "bad key sk-orca-secret123456", "x", PermissionDeniedError))
+
+
+def test_a_step_names_what_to_press_in_the_place_it_failed() -> None:
+    step = "press r: your resume is remembered."
+    assert explain(refusal(402, "x", "insufficient_user_quota"), step).endswith(f"then {step}")
+    assert explain(refusal(403, "x", "budget_exceeded", PermissionDeniedError), step).endswith(f"Then {step}")
+
+
+def test_only_a_401_is_a_refused_key_a_403_never_makes_the_key_forgotten() -> None:
+    assert refused(status_error(AuthenticationError, 401))
+    for error, _, _ in REFUSALS:
+        assert not refused(error)
+
+
+@pytest.mark.parametrize(
+    ("error", "name"),
+    [
+        (refusal(402, "x", "insufficient_user_quota"), "APIStatusError 402 insufficient_user_quota"),
+        (refusal(403, "x", "pre_consume_token_quota_failed", PermissionDeniedError), "PermissionDeniedError 403 pre_consume_token_quota_failed"),
+        (status_error(PermissionDeniedError, 403), "PermissionDeniedError 403"),
+        (status_error(AuthenticationError, 401), "AuthenticationError 401"),
+        (refusal(403, "x", "a code with spaces and <markup>", PermissionDeniedError), "PermissionDeniedError 403"),
+        (APIConnectionError(request=REQUEST), "APIConnectionError"),
+        (ValueError("x"), "ValueError"),
+    ],
+)
+def test_an_error_is_told_to_the_makers_with_its_status_and_the_services_code(error: Exception, name: str) -> None:
+    assert error_name(error) == name
+
+
+class ResumeRefused(ScriptedModelForApp):
+    """The account refuses what reading the resume asks, until `error` is None."""
+
+    def __init__(self, error: Exception | None) -> None:
+        super().__init__()
+        self.error = error
+
+    async def _create(self, **request: Any) -> Any:
+        if self.error is not None:
+            raise self.error
+        return await super()._create(**request)
+
+
+def test_no_credit_at_the_resume_says_so_and_r_asks_for_the_same_file_again(home: Path, resume: Path, tracked: list[dict[str, Any]]) -> None:
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        model = ResumeRefused(refusal(402, "no quota", "insufficient_user_quota"))
+        app.session._client = model  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            assert last_line(app) == NO_CREDIT_WORDS.format("press r: your resume is remembered.")
+            assert "Press r and give the file again" not in logged(app)
+            model.error = None
+            await pilot.press("r")
+            await wait_for_screen(pilot, TextPrompt)
+            assert app.screen.query_one(Input).value == str(resume)
+            await pilot.press("enter")
+            await settle(pilot, app)
+            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
+            # Read: nothing is remembered any more, and r asks an empty question.
+            await pilot.press("r")
+            await wait_for_screen(pilot, TextPrompt)
+            assert app.screen.query_one(Input).value == ""
+            await pilot.press("escape")
+
+    asyncio.run(run())
+    failed = [event["properties"] for event in tracked if event["event"] == "start_step" and event["properties"]["step"] == "resume_failed"]
+    assert [(step["error"], step["kind"]) for step in failed] == [("APIStatusError 402 insufficient_user_quota", ".txt")]
+    assert "resume_read" in steps_of(tracked)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        refusal(403, "x", "budget_exceeded", PermissionDeniedError), status_error(RateLimitError, 429), status_error(InternalServerError, 503),
+        APIConnectionError(request=REQUEST), status_error(AuthenticationError, 401),
+    ],
+)
+def test_the_resume_is_remembered_across_every_failure_of_the_account_or_the_service(home: Path, resume: Path, error: Exception, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ORCAROUTER_API_KEY")
+    (home / "key").write_text("sk-orca-kept", encoding="utf-8")
+
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        app.session._client = ResumeRefused(error)  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            if isinstance(error, RateLimitError):
+                # Told in a question of its own, whose Esc leaves the line checked below.
+                await wait_for_screen(pilot, Confirm)
+                await pilot.press("escape")
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            assert app.remembered == resume
+            if isinstance(error, AuthenticationError):
+                # The key is asked for again, and the resume after it, with the file in.
+                assert isinstance(app.screen, TextPrompt) and app.screen.question == "Paste your OrcaRouter key"
+                await pilot.press("escape")
+                return
+            assert "press r: your resume is remembered" in last_line(app).lower()
+            await pilot.press("r")
+            await wait_for_screen(pilot, TextPrompt)
+            assert app.screen.query_one(Input).value == str(resume)
+            await pilot.press("escape")
+
+    asyncio.run(run())
+
+
+def test_a_403_keeps_the_key_and_a_401_forgets_it(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ORCAROUTER_API_KEY")
+    (home / "key").write_text("sk-orca-mine", encoding="utf-8")
+
+    async def run(error: Exception) -> None:
+        app = AIHawk(home, resume)
+        app.session._client = ResumeRefused(error)  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            await pilot.press("escape")
+
+    asyncio.run(run(refusal(403, "This token has no access to model x", "", PermissionDeniedError)))
+    assert (home / "key").read_text(encoding="utf-8") == "sk-orca-mine"
+    asyncio.run(run(status_error(AuthenticationError, 401)))
+    assert not (home / "key").exists()
+
+
+@pytest.mark.parametrize(("error", "name", "words"), REFUSALS[2:])
+def test_a_refusal_at_the_resume_says_its_cause_and_the_resume_step(home: Path, resume: Path, error: Exception, name: str, words: str) -> None:
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        app.session._client = ResumeRefused(error)  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            assert last_line(app) == words.replace(GO_ON, "press r: your resume is remembered.")
+
+    asyncio.run(run())
+
+
+def test_a_file_that_is_not_a_document_or_not_a_file_is_not_remembered(home: Path, tmp_path: Path) -> None:
+    empty = tmp_path / "empty.txt"
+    empty.write_text("too short", encoding="utf-8")
+
+    async def run() -> None:
+        app = scripted_app(home, empty)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            assert app.remembered is None
+            await pilot.press("r")
+            await wait_for_screen(pilot, TextPrompt)
+            assert app.screen.query_one(Input).value == ""
+            # A path that is no file stays in the question's own check and is remembered nowhere.
+            app.screen.query_one(Input).value = str(tmp_path / "nothing.pdf")
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert "No file at that path." in str(app.screen.query_one("#problem", Static).content) and app.remembered is None
+            await pilot.press("escape")
+
+    asyncio.run(run())
+
+
+def test_an_application_refused_for_a_key_limit_says_the_cause_and_keeps_its_name(home: Path, resume: Path, restored_apply: Any) -> None:
+    async def run() -> None:
+        app = scripted_app(home, resume)
+
+        async def limited(client: Any, model: str, job: Any, *rest: Any, **keywords: Any) -> Outcome:
+            raise refusal(403, "token cycle spend limit reached, resets at 2026-11-13", "access_denied", PermissionDeniedError)
+
+        session_module.apply_to_job = limited  # type: ignore[assignment]
+        async with app.run_test(size=(120, 40)) as pilot:
+            await send_batch(app, pilot, ["space", "space"])
+            await pilot.press("enter")
+            await wait_for_apply(pilot, app)
+            await pilot.pause(0.2)
+            assert "Bestco: not sent, this key reached its spending limit for now." in app.query_one(Said).said
+            item = next(item for item in app.session.store.sent() if item.job.company == "Bestco")
+            assert item.status == "failed" and item.reason == "spend_limit"
+            assert item.note.startswith("This key reached its spending limit for now. Raise it at orcarouter.ai")
+
+    asyncio.run(run())
+
+
+def test_scoring_stopped_by_a_key_limit_says_the_cause(home: Path, resume: Path) -> None:
+    class Limited(NoCredit):
+        async def post(self, path: str, *, body: dict[str, Any], cast_to: type) -> dict[str, Any]:
+            self.attempts += 1
+            raise refusal(403, "token quota is not enough", "pre_consume_token_quota_failed", PermissionDeniedError)
+
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        model = Limited()
+        app.session._client = model  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            assert last_line(app) == f"This key's own limit is used up. Raise it, or make a new key, at orcarouter.ai. Then {GO_ON}"
+            assert model.attempts == 1
+
+    asyncio.run(run())
+
+
+class Billing:
+    """What the balance page of OrcaRouter says to each ask, in turn (the last one stays): a number of dollars, an error to
+    raise, or any other answer as it is."""
+
+    def __init__(self, *answers: Any) -> None:
+        self.answers = list(answers)
+        self.asked = 0
+
+    async def get(self, path: str, cast_to: type) -> Any:
+        assert path == "/tools/balance"
+        self.asked += 1
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, float | int) and not isinstance(answer, bool):
+            return {"success": True, "data": {"wallet_usd": answer, "spendable_usd": answer}}
+        return answer
+
+
+def with_billing(app: AIHawk, billing: Billing) -> None:
+    """A key typed in is accepted and kept, and its account answers as `billing` says."""
+    app.session.key_accepted = accepting(True, True, True)  # type: ignore[method-assign]
+    app.session.save_key = lambda key: (type(app.session.config).save_key(app.session.config, key), setattr(app.session, "_client", ScriptedModelForApp()))  # type: ignore[method-assign]
+    app.session.key_client = lambda key: SimpleNamespace(get=billing.get)  # type: ignore[method-assign,assignment]
+
+
+def steps_of(tracked: list[dict[str, Any]]) -> list[str]:
+    return [event["properties"]["step"] for event in tracked if event["event"] == "start_step"]
+
+
+def test_a_key_with_no_credit_says_so_before_the_resume_and_enter_checks_again_until_there_is(
+    home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch, tracked: list[dict[str, Any]]
+) -> None:
+    monkeypatch.delenv("ORCAROUTER_API_KEY")
+    billing = Billing(0, 0.0, 3.5)
+    opened: list[str] = []
+    import aihawk.screens as screens_module
+
+    monkeypatch.setattr(screens_module.webbrowser, "open", lambda url: opened.append(url) or True)
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        with_billing(app, billing)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            app.screen.query_one(Input).value = "sk-orca-new"
+            await pilot.press("enter")
+            await wait_for_screen(pilot, Confirm)
+            assert app.screen.question.startswith("This key works, but its OrcaRouter account has no credit yet.")
+            assert "add them at orcarouter.ai" in app.screen.question
+            assert app.screen.hint == "Enter checks again · Ctrl+O opens orcarouter.ai · Esc goes on without"
+            assert companies(app) == []
+            await pilot.press("ctrl+o")
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            # Still none: the same question, said once more.
+            assert isinstance(app.screen, Confirm) and app.screen.question.startswith("Still no credit")
+            await pilot.press("enter")
+            await settle(pilot, app)
+            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
+
+    asyncio.run(run())
+    assert opened == ["https://www.orcarouter.ai/ref/ref_accd17afb78fc95ac4d7"]
+    steps = steps_of(tracked)
+    assert steps[:5] == ["key_asked", "key_saved", "no_credit_asked", "no_credit_checked", "credit_added"] and steps[5] == "resume_read"
+    assert billing.asked == 3
+
+
+def test_escape_on_the_credit_question_goes_on_with_the_resume_without_credit(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch, tracked: list[dict[str, Any]]) -> None:
+    monkeypatch.delenv("ORCAROUTER_API_KEY")
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        with_billing(app, Billing(0))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            app.screen.query_one(Input).value = "sk-orca-new"
+            await pilot.press("enter")
+            await wait_for_screen(pilot, Confirm)
+            await pilot.press("escape")
+            await settle(pilot, app)
+            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
+
+    asyncio.run(run())
+    assert steps_of(tracked)[:5] == ["key_asked", "key_saved", "no_credit_asked", "no_credit_skipped", "resume_read"]
+    assert (home / "key").read_text(encoding="utf-8") == "sk-orca-new"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        2.5, 1e-9, APIConnectionError(request=REQUEST), status_error(InternalServerError, 503), status_error(AuthenticationError, 401),
+        {}, {"data": None}, {"data": {}}, {"data": {"spendable_usd": None}}, {"data": {"spendable_usd": "0"}},
+        {"data": {"spendable_usd": True}}, {"data": {"spendable_usd": False}}, {"spendable_usd": 0}, ["x"], "text",
+        # What the OpenAI-shaped billing page said for a new account with no credit: it is not the balance page's answer.
+        {"object": "billing_subscription", "hard_limit_usd": 0},
+    ],
+)
+def test_the_credit_question_is_never_asked_when_the_service_says_there_is_some_or_says_nothing_usable(
+    home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch, tracked: list[dict[str, Any]], answer: Any
+) -> None:
+    monkeypatch.delenv("ORCAROUTER_API_KEY")
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        with_billing(app, Billing(answer))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            app.screen.query_one(Input).value = "sk-orca-new"
+            await pilot.press("enter")
+            await settle(pilot, app)
+            assert not isinstance(app.screen, Confirm)
+            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
+
+    asyncio.run(run())
+    assert not any(step.startswith("no_credit") or step == "credit_added" for step in steps_of(tracked))
+
+
+def test_a_key_changed_in_the_settings_is_asked_about_its_credit_too(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch, tracked: list[dict[str, Any]]) -> None:
+    monkeypatch.delenv("ORCAROUTER_API_KEY")
+    (home / "key").write_text("sk-orca-old", encoding="utf-8")
+
+    async def run() -> None:
+        app = scripted_app(home, resume)
+        with_billing(app, Billing(0))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.press("e")
+            await wait_for_screen(pilot, Settings)
+            app.screen.query_one(DataTable).move_cursor(row=[key.value for key in app.screen.query_one(DataTable).rows].index("key"))
+            await pilot.press("enter")
+            await wait_for_screen(pilot, TextPrompt)
+            app.screen.query_one(Input).value = "sk-orca-new"
+            await pilot.press("enter")
+            await wait_for_screen(pilot, Confirm)
+            await pilot.press("escape")
+            await wait_for_screen(pilot, Settings)
+            await pilot.press("escape")
+
+    asyncio.run(run())
+    assert (home / "key").read_text(encoding="utf-8") == "sk-orca-new"
+    assert steps_of(tracked)[-2:] == ["no_credit_asked", "no_credit_skipped"]
+
+
+def test_the_balance_page_is_asked_through_the_key_client_and_only_a_number_up_to_zero_says_no_credit(home: Path) -> None:
+    session = Session(home)
+    paths: list[str] = []
+
+    async def get(path: str, cast_to: type) -> Any:
+        paths.append(path)
+        return {"success": True, "data": {"wallet_usd": 0, "spendable_usd": 0}}
+
+    session.key_client = lambda key: SimpleNamespace(get=get)  # type: ignore[method-assign,assignment]
+    assert asyncio.run(session.has_no_credit("sk-orca-x")) is True
+    assert paths == ["/tools/balance"]
+    session.close()
+
+
+def test_every_cause_about_the_account_has_its_words_in_the_list_of_applications() -> None:
+    from aihawk import llm
+    from aihawk.apply import WHY_NOT_SENT
+
+    # A batch stops at the first of these: the next application would fail the same way.
+    assert llm.ACCOUNT_CAUSES <= set(WHY_NOT_SENT)
+    assert {"no_credit", "key_limit", "spend_limit", "model_not_allowed"} <= llm.ACCOUNT_CAUSES
+
+
+FREE_PLAN_WORDS = "OrcaRouter is limiting this account: its free plan is not enough for AIHawk. Add a few dollars at orcarouter.ai, then try again."
+
+
+def test_a_resume_refused_as_too_many_requests_says_the_free_plan_is_not_enough_and_enter_reads_it_again(
+    home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch, tracked: list[dict[str, Any]]
+) -> None:
+    opened: list[str] = []
+    import aihawk.screens as screens_module
+
+    monkeypatch.setattr(screens_module.webbrowser, "open", lambda url: opened.append(url) or True)
+
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        model = ResumeRefused(status_error(RateLimitError, 429))
+        app.session._client = model  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await wait_for_screen(pilot, Confirm)
+            assert app.screen.question == FREE_PLAN_WORDS
+            assert app.screen.hint == "Enter tries again · Ctrl+O opens orcarouter.ai · Esc later"
+            assert companies(app) == []
+            await pilot.press("ctrl+o")
+            # The credit is added: the resume is read again from the remembered file, and the jobs come.
+            model.error = None
+            await pilot.press("enter")
+            await settle(pilot, app)
+            assert not isinstance(app.screen, Confirm)
+            assert companies(app) == ["Bestco", "Lowly", "Noplugin"]
+            assert app.remembered is None
+
+    asyncio.run(run())
+    assert opened == ["https://www.orcarouter.ai/ref/ref_accd17afb78fc95ac4d7"]
+    steps = steps_of(tracked)
+    assert steps[steps.index("free_plan_told") :][:3] == ["free_plan_told", "free_plan_retry", "resume_read"]
+    assert "free_plan_later" not in steps
+
+
+def test_a_resume_still_refused_as_too_many_requests_is_told_again_on_each_try(home: Path, resume: Path, tracked: list[dict[str, Any]]) -> None:
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        app.session._client = ResumeRefused(status_error(RateLimitError, 429))  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await wait_for_screen(pilot, Confirm)
+            await pilot.press("enter")
+            await pilot.pause(0.3)
+            await wait_for_screen(pilot, Confirm)
+            assert app.screen.question == FREE_PLAN_WORDS
+            await pilot.press("escape")
+            await settle(pilot, app)
+
+    asyncio.run(run())
+    assert [step for step in steps_of(tracked) if step.startswith("free_plan")] == ["free_plan_told", "free_plan_retry", "free_plan_told", "free_plan_later"]
+
+
+def test_escape_on_the_free_plan_question_leaves_the_line_that_says_r_reads_the_resume_again(
+    home: Path, resume: Path, tracked: list[dict[str, Any]]
+) -> None:
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        model = ResumeRefused(status_error(RateLimitError, 429))
+        app.session._client = model  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await wait_for_screen(pilot, Confirm)
+            await pilot.press("escape")
+            await settle(pilot, app)
+            assert not isinstance(app.screen, Confirm)
+            assert last_line(app) == "The AI service is busy. Wait a minute. Press r: your resume is remembered."
+            assert companies(app) == [] and app.remembered == resume
+            model.error = None
+            await pilot.press("r")
+            await wait_for_screen(pilot, TextPrompt)
+            assert app.screen.query_one(Input).value == str(resume)
+            await pilot.press("escape")
+
+    asyncio.run(run())
+    steps = steps_of(tracked)
+    assert "free_plan_told" in steps and "free_plan_later" in steps and "free_plan_retry" not in steps
+
+
+def test_too_many_requests_while_scoring_does_not_say_the_free_plan_is_not_enough(
+    home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch, tracked: list[dict[str, Any]]
+) -> None:
+    monkeypatch.setattr(tui_module, "RETRY_PAUSES", (0.01, 0.01, 0.01, 0.01))
+
+    class Busy(ScriptedModelForApp):
+        async def post(self, path: str, *, body: dict[str, Any], cast_to: type) -> dict[str, Any]:
+            raise status_error(RateLimitError, 429)
+
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        app.session._client = Busy()  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, Confirm)
+
+    asyncio.run(run())
+    assert not any(step.startswith("free_plan") for step in steps_of(tracked))
+    assert "resume_read" in steps_of(tracked)
+
+
+def test_no_credit_at_the_resume_is_not_the_free_plan_question(home: Path, resume: Path, tracked: list[dict[str, Any]]) -> None:
+    async def run() -> None:
+        app = AIHawk(home, resume)
+        app.session._client = ResumeRefused(refusal(402, "no quota", "insufficient_user_quota"))  # type: ignore[assignment]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot, app)
+            await pilot.pause(0.2)
+            assert not isinstance(app.screen, Confirm)
+            assert last_line(app) == NO_CREDIT_WORDS.format("press r: your resume is remembered.")
+
+    asyncio.run(run())
+    assert not any(step.startswith("free_plan") for step in steps_of(tracked))

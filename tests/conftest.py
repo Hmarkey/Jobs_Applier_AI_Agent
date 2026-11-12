@@ -36,16 +36,22 @@ def a_computer_the_browser_can_open_on(monkeypatch: pytest.MonkeyPatch) -> None:
     from aihawk import apply
 
     monkeypatch.setattr(apply, "PLATFORM", "a test")
+    # The processor too: a test that names Linux means the kind the browser is built for, whatever machine runs it.
+    monkeypatch.setattr(apply, "MACHINE", "x86_64")
 
 
 @pytest.fixture(autouse=True)
 def no_key_check_over_the_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A key typed in is tried against the service: in a test the service cannot be reached, which never blocks a key."""
+    """A key typed in is tried against the service: in a test the service cannot be reached, which never blocks a key; its
+    account's credit is read from the balance page, which a test answers with some."""
     from openai import APIConnectionError
 
     from aihawk import session
 
-    async def unreachable(path: str, cast_to: type) -> None:
+    async def unreachable(path: str, cast_to: type) -> dict[str, Any]:
+        if path == "/tools/balance":
+            # The balance page says what credit is left: by default the account has some, so no test is asked about it.
+            return {"success": True, "data": {"wallet_usd": 5.0, "spendable_usd": 5.0}}
         raise APIConnectionError(request=httpx.Request("GET", "https://api.orcarouter.ai/v1" + path))
 
     monkeypatch.setattr(session.Session, "key_client", lambda self, key: SimpleNamespace(get=unreachable))

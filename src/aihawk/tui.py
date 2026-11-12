@@ -10,6 +10,7 @@ from collections import deque
 from pathlib import Path
 from typing import ClassVar
 
+from openai import RateLimitError
 from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
@@ -18,11 +19,11 @@ from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Input, Static
 
 from aihawk import errors
-from aihawk.apply import MAILBOXES, Outcome, mail_provider, why_not_sent
+from aihawk.apply import MAILBOXES, Outcome, mail_provider, no_browser_here, why_not_sent
 from aihawk.config import KEY_ENV, KEY_URL, ConfigError
 from aihawk.database import DatabaseError
 from aihawk.library import LibraryError, Stopped
-from aihawk.llm import account_problem, explain, refused
+from aihawk.llm import account_problem, error_name, explain, not_answering, refused
 from aihawk.scoring import NotAnswering
 from aihawk.screens import WIDE_ENOUGH, Confirm, JobDetails, Rows, Said, SendBatch, SentList, Settings, SignIn, StopSending, TextPrompt, clipped
 from aihawk.session import Session
@@ -59,6 +60,21 @@ KEY_HINT = (
     "Enter saves · Esc later"
 )
 KEY_REFUSED = "OrcaRouter did not accept that key. Check it and paste it again."
+NO_CREDIT_QUESTION = (
+    "This key works, but its OrcaRouter account has no credit yet. AIHawk needs a few dollars there to read your resume and the jobs: "
+    "add them at orcarouter.ai."
+)
+NO_CREDIT_AGAIN = "Still no credit on that account. AIHawk needs a few dollars there to read your resume and the jobs: add them at orcarouter.ai."
+NO_CREDIT_HINT = "Enter checks again · Ctrl+O opens orcarouter.ai · Esc goes on without"
+# Reading the resume refused as too many requests is told as OrcaRouter's free plan being too little, the owner's decision of
+# 2026-11-12: the person is told what to do about it, and the resume is read again on Enter. It can also come to an account
+# with credit when the service is busy; the question then still says where credit is added.
+FREE_PLAN_QUESTION = (
+    "OrcaRouter is limiting this account: its free plan is not enough for AIHawk. Add a few dollars at orcarouter.ai, then try again."
+)
+FREE_PLAN_HINT = "Enter tries again · Ctrl+O opens orcarouter.ai · Esc later"
+# What to press after a failure at the resume, whose file is remembered.
+RESUME_REMEMBERED = "press r: your resume is remembered."
 MAIL_LATER = "Mail left for later: e, then Your mail."
 MAIL_NAMES = {"gmail": "Gmail", "outlook": "Outlook"}
 RESUME_HINT = "PDF, .docx or text · Enter reads it · Esc later"
@@ -131,6 +147,8 @@ class AIHawk(App[None]):
         self.resume = resume
         # The error of a resume that failed to be read, which the start has told already.
         self.reported: Exception | None = None
+        # The file of a resume that failed for the account or the service, not for the file: r asks for it again with its path in.
+        self.remembered: Path | None = None
         self.selected: set[str] = set()
         # The pages made so far, each its jobs' ids in the order shown; the page shown; and one asked for before it was ready.
         self.pages: list[list[str]] = []
@@ -152,6 +170,8 @@ class AIHawk(App[None]):
         # What the log says about scoring that did not go through, which the count of the download must not cover.
         self.stuck = ""
         self.signing_in = False
+        # Whether the person left the mail for later in this run: a site's code is asked about once, not at every application.
+        self.mail_left = False
         # Why the key is being asked for again, for the question to say; and whether the start stopped for want of one.
         self.key_problem = ""
         self.sending = ""
@@ -177,6 +197,9 @@ class AIHawk(App[None]):
         self.query_one(DataTable).focus()
         self.show_heading()
         self.session.telemetry.started()
+        if words := no_browser_here():
+            # Said before the person spends an evening choosing jobs they cannot apply to from here.
+            self.say(words)
         self.start()
 
     def on_resize(self, event: events.Resize) -> None:
@@ -222,11 +245,11 @@ class AIHawk(App[None]):
         is one line, not a list. With `replace`, it ends such a state: it takes its place and stays."""
         self.query_one(Said).say(line, again, replace)
 
-    def failed(self, error: Exception, then: str = "") -> None:
-        """Says what went wrong, in plain words, and `then`, the next step. A key the AI service refused is forgotten when it
-        came from the file, and asked for again."""
+    def failed(self, error: Exception, then: str = "", step: str = "press → to go on.") -> None:
+        """Says what went wrong, in plain words, and `then`, the next step; for an account that must be mended first, `step` is
+        what to press after. A key the AI service refused is forgotten when it came from the file, and asked for again."""
         if not refused(error):
-            self.say(f"{errors.explained(error)}{then}")
+            self.say(f"{errors.explained(error, step)}{then}")
             return
         line = self.session.refuse_key()
         self.say(line)
@@ -306,6 +329,8 @@ class AIHawk(App[None]):
     async def start(self) -> None:
         # A new search is a new list: its pages are made again.
         self.pages, self.page, self.wanted, self.stuck = [], 0, None, ""
+        # An error told by an earlier start is not this one's.
+        self.reported = None
         self.refresh_jobs()
         session = self.session
         try:
@@ -313,9 +338,6 @@ class AIHawk(App[None]):
                 return
             if (self.resume or session.needs_resume()) and not await self.read_resume():
                 return
-            if not session.mail()[1]:
-                session.telemetry.step("mail_asked")
-                session.telemetry.step("mail_ready" if await self.set_up_mail() else "mail_later")
             # The jobs scored before, by an earlier search: the first pages, sorted as they are. While the jobs still come
             # there is the one page, the best so far, which each round of scoring makes again.
             scored = [item.job.id for item in session.store.all() if item.score is not None]
@@ -343,18 +365,38 @@ class AIHawk(App[None]):
             self.say(f"{error}{self.resume_next()}")
         except Exception as error:  # noqa: BLE001  The screen stays up and says what went wrong, instead of a traceback over it.
             self.start_failed(error)
-            self.failed(error, self.resume_next())
+            if isinstance(error, RateLimitError) and error is self.reported and self.remembered and await self.free_plan_told():
+                # The same file, read again as r would after the person gave it: the start is made anew.
+                self.resume = self.remembered
+                self.start()
+            elif self.remembered and account_problem(error):
+                self.failed(error, step=RESUME_REMEMBERED)
+            else:
+                self.failed(error, self.resume_next())
         finally:
             self.show_heading()
 
+    async def free_plan_told(self) -> bool:
+        """Said when reading the resume was refused as too many requests, which the retries of the request did not clear: that is
+        what an account on OrcaRouter's free plan gets. It stops, as before, and is not tried again by itself; Enter reads the
+        resume again once the person has added credit, Esc leaves the line that says r does it."""
+        telemetry = self.session.telemetry
+        telemetry.step("free_plan_told")
+        again = await self.push_screen_wait(Confirm(FREE_PLAN_QUESTION, FREE_PLAN_HINT, link=KEY_URL))
+        telemetry.step("free_plan_retry" if again else "free_plan_later")
+        return again
+
     def resume_next(self) -> str:
-        """What to press when a start stopped for want of a resume: the file is given again with r."""
+        """What to press when a start stopped for want of a resume: the file is given again with r, and when it is remembered
+        the question has it already."""
+        if self.remembered:
+            return f" {RESUME_REMEMBERED.capitalize()}"
         return " Press r and give the file again." if self.session.needs_resume() else ""
 
     def start_failed(self, error: Exception) -> None:
         """A start that ended in an error, told once: a resume that could not be read said so already, with its kind."""
         if error is not self.reported:
-            self.session.telemetry.step("start_error", error=type(error).__name__)
+            self.session.telemetry.step("start_error", error=error_name(error))
 
     async def ask_key(self) -> bool:
         """The key asked for and kept; False when the person has none for now."""
@@ -368,7 +410,26 @@ class AIHawk(App[None]):
             return False
         self.session.save_key(key)
         telemetry.step("key_saved")
+        await self.check_credit(key)
         return True
+
+    async def check_credit(self, key: str) -> None:
+        """A new OrcaRouter account has a key that works and no credit, and the first call, reading the resume, would be refused.
+        Said before it: Enter looks again, Esc goes on without. Nothing is said when the service does not say."""
+        telemetry = self.session.telemetry
+        if not await self.session.has_no_credit(key):
+            return
+        telemetry.step("no_credit_asked")
+        question = NO_CREDIT_QUESTION
+        while await self.push_screen_wait(Confirm(question, NO_CREDIT_HINT, link=KEY_URL)):
+            self.say("Looking for the credit…", again=True)
+            if not await self.session.has_no_credit(key):
+                telemetry.step("credit_added")
+                self.say("The credit is there.", again=True)
+                return
+            telemetry.step("no_credit_checked")
+            question = NO_CREDIT_AGAIN
+        telemetry.step("no_credit_skipped")
 
     async def take_key(self) -> str | None:
         """A key the person pasted and the service accepts, or None when they leave the question. A key it refuses is asked for
@@ -403,9 +464,12 @@ class AIHawk(App[None]):
         try:
             await self.session.load_resume(path)
         except Exception as error:
-            telemetry.step("resume_failed", error=type(error).__name__, kind=path.suffix.lower())
+            telemetry.step("resume_failed", error=error_name(error), kind=path.suffix.lower())
             self.reported = error
+            # A file that is fine, and a key, an account or a service that was not: the same file is tried again with one key press.
+            self.remembered = path if account_problem(error) or not_answering(error) or refused(error) else None
             raise
+        self.remembered = None
         telemetry.step("resume_read", kind=path.suffix.lower())
         # A new resume is a new search: the jobs of the old one that nobody applied to give way to the new one's.
         self.forget_untried()
@@ -430,7 +494,9 @@ class AIHawk(App[None]):
                 return "No file at that path."
             return None
 
-        answer = await self.push_screen_wait(TextPrompt(RESUME_QUESTION, placeholder=RESUME_PLACEHOLDER, hint=RESUME_HINT, check=missing))
+        answer = await self.push_screen_wait(
+            TextPrompt(RESUME_QUESTION, placeholder=RESUME_PLACEHOLDER, hint=RESUME_HINT, check=missing, value=str(self.remembered) if self.remembered else None)
+        )
         return self.as_path(answer) if answer else None
 
     @staticmethod
@@ -769,7 +835,7 @@ class AIHawk(App[None]):
             if choice == "folder":
                 webbrowser.open(self.session.config.workspace.as_uri())
             elif choice == "mail":
-                await self.set_up_mail()
+                self.mail_left = not await self.set_up_mail()
             elif choice == "answers":
                 await self.change_answers()
             elif choice == "key":
@@ -875,6 +941,7 @@ class AIHawk(App[None]):
         key = await self.take_key()
         if key:
             self.session.save_key(key)
+            await self.check_credit(key)
             if self.waiting_for_key:
                 # The start stopped for want of a key: with one, it goes on with the resume and the rest.
                 self.waiting_for_key = False
@@ -907,6 +974,9 @@ class AIHawk(App[None]):
             self.say("No resume given." if self.session.needs_resume() else "Your resume was not changed.")
 
     def action_apply(self) -> None:
+        if words := no_browser_here():
+            self.say(words)
+            return
         if self.busy():
             return
         self.apply_selected()
@@ -998,11 +1068,19 @@ class AIHawk(App[None]):
             self.refresh_jobs()
 
     async def mail_then_retry(self, items: list[Stored]) -> list[tuple[Stored, Outcome]]:
-        """A site sent a code to the mail and the mailbox was not signed in: the sign-in now, then those applications again."""
+        """A site sent a code to the mail and the mailbox was not signed in: the question about it now, the sign-in, then those
+        applications again. This is the first place the mail is asked about, since only a code needs it. One left for later is not
+        asked again until AIHawk is opened again: the next ones say it and go on."""
         self.say("A site sent you a code by email, and AIHawk cannot read your mailbox yet.")
-        if await self.set_up_mail(MAIL_CODE_QUESTION):
-            return await self.send(items)
-        return []
+        if self.mail_left:
+            self.say(MAIL_LATER)
+            return []
+        telemetry = self.session.telemetry
+        telemetry.step("mail_asked")
+        ready = await self.set_up_mail(MAIL_CODE_QUESTION)
+        telemetry.step("mail_ready" if ready else "mail_later")
+        self.mail_left = not ready
+        return await self.send(items) if ready else []
 
     def can_send(self, item: Stored) -> bool:
         """Whether the job goes in the batch: all of them, but one already sent."""
