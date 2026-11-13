@@ -254,11 +254,15 @@ You fill in one job application form in a browser, for the candidate, from the C
 - Tick the boxes the form requires.
 - Decline optional demographic questions (gender, ethnicity, disability, veteran status) with the form's "prefer not
   to say" option unless the answers text gives an answer.
-- Upload the CV file at the path given to you to the resume field. Read the page with browser_snapshot before acting
+- Upload the CV file at the path given to you to the resume field, unless a resume is already attached there (an add-on
+  the brief names may attach one): never upload a second. Read the page with browser_snapshot before acting
   on it. A file input the page hides refuses the file, and the tool says so: give it instead to the button or label
   that opens the chooser, which is often `[aria-labelledby="<the input's label id>"] button`.
 - Do not send the application yourself. When every required field is filled, call finish_form with status ready and the
   CSS selector of the submit control. Status ready needs that selector: with no selector for it, report blocked.
+- A page that shows your answers for a last look before sending (Review, Summary, Confirm your application) is the end:
+  never go back from it to earlier steps to check or change them. Call finish_form there, with its send control. Only an
+  error the page shows in red is a reason to go back, and then only to the step it names.
 - An action that leaves the page as it was will not work the second time: never repeat it, do something else. A key that
   scrolls nothing means the form scrolls inside its own container: read and reach its fields with browser_evaluate.
 - A captcha shown as a box to tick: click it. A puzzle or image challenge, a login wall or a closed posting: call
@@ -511,13 +515,19 @@ async def _not_one(session: Browser, selector: str) -> str:
     return f"{selector} matches {count} elements on this page, and a click sends only the first. Name the one control that sends the form, then call finish_form again."
 
 
-async def fill_form(session: Browser, tools: list[dict[str, Any]], client: AsyncOpenAI, model: str, brief: str, guidance: str = "", page_rules: str = "") -> Report:
+async def fill_form(
+    session: Browser, tools: list[dict[str, Any]], client: AsyncOpenAI, model: str, brief: str, guidance: str = "", page_rules: str = "",
+    simplify: bool = False,
+) -> Report:
     """The model works on the open page until it calls finish_form; returns how it ended. There is no limit on steps:
-    a form takes the steps it needs, and the watch ends a run that goes nowhere."""
+    a form takes the steps it needs, and the watch ends a run that goes nowhere. With `simplify`, the model also has
+    simplify_fill, which presses Simplify Copilot on the page it is on."""
     messages: list[Any] = [{"role": "system", "content": instructions(guidance, page_rules)}, {"role": "user", "content": brief}]
     watch = _Watch()
+    offered = [*tools, *([SIMPLIFY_TOOL] if simplify else []), FINISH_TOOL]
+    account_made = False
     while True:
-        response, request_id = await patiently(lambda: chat(client, model=model, messages=messages, tools=[*tools, FINISH_TOOL]))
+        response, request_id = await patiently(lambda: chat(client, model=model, messages=messages, tools=offered))
         SPEND.note(model, getattr(response, "usage", None), request_id)
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
@@ -542,9 +552,19 @@ async def fill_form(session: Browser, tools: list[dict[str, Any]], client: Async
                     continue
                 return Report(
                     str(arguments.get("status", "")), str(arguments.get("summary", "")), str(arguments.get("submit_selector", "")),
-                    str(arguments.get("blocked_by") or ""), bool(arguments.get("made_account")), watch.turns,
+                    str(arguments.get("blocked_by") or ""), bool(arguments.get("made_account")) or account_made, watch.turns,
                     tuple(asked_of(arguments.get("inferred"))),
                 )
+            if name == "simplify_fill" and simplify:
+                if told := NOTE.get():
+                    told("Simplify Copilot is filling this page…")
+                words, made = await simplify_act(session)
+                if told:
+                    told("")
+                account_made = account_made or made
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": words})
+                watch.saw(name, arguments, words + str(await _read(session, PAGE_MARK)))
+                continue
             # The plugins say two visits to the mailbox; the code holds the model to it, whatever it reasons.
             if name == "browser_navigate" and watch.one_visit_too_many(str(arguments.get("url", ""))):
                 return _blocked(NO_CODE, NO_CODE_REASON, watch.turns)
@@ -706,22 +726,60 @@ def _secrets_in(answers: str) -> tuple[str, ...]:
     return tuple(line.split(":", 1)[1].strip() for line in answers.splitlines() if line.startswith("account_password:"))
 
 
-# Simplify Copilot, the browser add-on that fills a form from the person's Simplify profile, as it is in their browser: its panel,
-# in an open shadow root, holds the button that fills the page; once it has filled, the button says "Run Autofill Again". Seen on
-# Greenhouse and Lever with version 3.1.14 on 2026-11-12: the panel was there within 6 seconds, and the filling took 20.
+# Simplify Copilot, the browser add-on that fills a form from the person's Simplify profile, as it is in their browser: a panel in
+# an open shadow root, whose buttons change with the page. Seen with version 3.1.14 on 2026-11-12 and 13:
+# - a form (Greenhouse, Lever, a Workday step): #fill-button, "Autofill This Page", then "Autofilling", then "Run Autofill
+#   Again" once done; the panel was there within 6 seconds and the filling took 8 to 20;
+# - Workday's Create Account page: #account-fill-button, "Create Account & Autofill", which fills the email and a password of
+#   its own (16 characters) and adds #account-submit-button, "Create Account"; that one makes the account, signs in, and the
+#   add-on fills the first step of the application by itself.
 SIMPLIFY_ID = "sabre@simplify.jobs"
 SIMPLIFY_ADDON_URL = "https://addons.mozilla.org/firefox/addon/simplify-jobs/"
 SIMPLIFY_BUTTON = "#fill-button"
+SIMPLIFY_ACCOUNT = "#account-fill-button"
+SIMPLIFY_ACCOUNT_SEND = "#account-submit-button"
 SIMPLIFY_PANEL_S = 12
 SIMPLIFY_FILL_S = 60
+SIMPLIFY_ACCOUNT_S = 20
+SIMPLIFY_PAGE_S = 30
 SIMPLIFY_POLL_S = 1.5
-# The button's words, read where it is: the page's own script cannot reach into the add-on's shadow root, but reading can.
-SIMPLIFY_LABEL = (
-    "(() => { const roots = [document]; for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*'))"
-    " if (node.shadowRoot) roots.push(node.shadowRoot);"
-    f" for (const root of roots) {{ const button = root.querySelector({json.dumps(SIMPLIFY_BUTTON)});"
-    " if (button) return (button.innerText || button.textContent || '').trim().replace(/\\s+/g, ' '); } return null; })()"
+# A press of "Run Autofill Again" can read as done before the add-on has started: what it says this soon after is not believed.
+SIMPLIFY_STARTS_S = 3.0
+# Each button the panel shows, by its id, with its words; null when the page has no panel. Read where they are: the page's own
+# script cannot reach into the add-on's shadow root, but reading can.
+SIMPLIFY_BUTTONS = (
+    "(() => { const roots = [document]; let panel = false; for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*'))"
+    " if (node.shadowRoot) { roots.push(node.shadowRoot); if (String(node.className).includes('simplify')) panel = true; }"
+    " const found = {}; for (const root of roots.slice(1)) for (const id of ['fill-button', 'account-fill-button', 'account-submit-button']) {"
+    " const button = root.getElementById ? root.getElementById(id) : root.querySelector('#' + id);"
+    " if (button) found[id] = (button.innerText || button.textContent || '').trim().replace(/\\s+/g, ' '); }"
+    " return panel || Object.keys(found).length ? found : null; })()"
 )
+# Where the browser is, as far as telling that a page moved on: the address and the page's headings.
+PAGE_MARK = "(() => location.href + ' | ' + [...document.querySelectorAll('h1, h2, h3')].map(node => node.innerText.trim()).join(' / '))()"
+NO_PANEL = "There is no Simplify panel on this page: do it yourself, by the general rules."
+SIMPLIFY_RULES = """\
+Simplify Copilot, a browser add-on, is in this browser with the candidate's Simplify profile, and the simplify_fill tool \
+presses it for you. These rules come before the general ones on accounts and on the CV:
+- On every new page or step of the form, call simplify_fill first, before you fill anything yourself; then read the page and \
+do only what it left.
+- A create-account or sign-in page: call simplify_fill. Simplify makes the account or signs in, with a password it keeps, and \
+opens the application. Only when it says there is no panel, or the page did not move on, do it yourself: sign in with the \
+account_password from the answers, or create the account with it.
+- The resume: Simplify attaches it. Never upload the CV file where a resume is already attached; upload it yourself only \
+when the resume field still shows no file after simplify_fill.
+- Keep what Simplify filled; change a field it filled only when its answer plainly belongs to another question.
+- Its panel at the side of the page is not part of the form: never click in it yourself."""
+SIMPLIFY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "simplify_fill",
+        "description": "Press Simplify Copilot on the current page and wait for it: on a create-account or sign-in page it "
+        "makes the account or signs in and opens the application; on a form page or step it fills what it can from the "
+        "candidate's Simplify profile and attaches the resume. Call it first on every new page or step. It says what it did.",
+        "parameters": {"type": "object", "additionalProperties": False, "properties": {}},
+    },
+}
 # How many of the form's fields hold something: what an add-on's filling changes.
 FILLED = (
     "(() => [...document.querySelectorAll('input:not([type=hidden]), textarea, select')].filter(field =>"
@@ -752,39 +810,93 @@ async def _read(session: Browser, expression: str) -> Any:
         return None
 
 
-async def simplify_autofill(session: Browser) -> str:
-    """Simplify Copilot fills the open form, when its panel is on the page: its button pressed with a real click, as a person
-    would (the browser refuses a click from script), and the form left to it until it says it is done. What the model is told
-    about it; empty when there was no panel, or the click did nothing, and the model fills the form alone as before."""
-    label = None
-    for _ in range(int(SIMPLIFY_PANEL_S / SIMPLIFY_POLL_S)):
-        if isinstance(label := await _read(session, SIMPLIFY_LABEL), str):
-            break
+async def _simplify_buttons(session: Browser, seconds: float) -> dict[str, str] | None:
+    """The panel's buttons and their words, once it is on the page, waited for up to `seconds`; None when there is no panel."""
+    for _ in range(max(1, int(seconds / SIMPLIFY_POLL_S))):
+        if isinstance(buttons := await _read(session, SIMPLIFY_BUTTONS), dict):
+            return buttons
         await asyncio.sleep(SIMPLIFY_POLL_S)
-    if not isinstance(label, str):
-        return ""
-    before = await _read(session, FILLED)
-    clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
-    if clicked.isError:
-        return ""
+    return None
+
+
+async def _simplify_filling(session: Browser, pressed: bool) -> None:
+    """Until the add-on says it has filled the page ("Run Autofill Again"), or SIMPLIFY_FILL_S have gone. A press of a button
+    that already said so is not believed for its first seconds: the add-on may not have started yet."""
+    started = time.monotonic()
     working = False
     for _ in range(int(SIMPLIFY_FILL_S / SIMPLIFY_POLL_S)):
         await asyncio.sleep(SIMPLIFY_POLL_S)
-        label = await _read(session, SIMPLIFY_LABEL)
+        label = ((await _read(session, SIMPLIFY_BUTTONS)) or {}).get("fill-button")
         if not isinstance(label, str):
             continue
         busy = "autofilling" in label.lower()
         working = working or busy
-        if "again" in label.lower() or (working and not busy):
-            break
+        early = pressed and time.monotonic() - started < SIMPLIFY_STARTS_S
+        if (working and not busy) or ("again" in label.lower() and not busy and not early):
+            return
+
+
+async def _moved(session: Browser, before: Any) -> bool:
+    """Whether the page moved on from `before` (its address or its headings) within SIMPLIFY_PAGE_S."""
+    for _ in range(int(SIMPLIFY_PAGE_S / SIMPLIFY_POLL_S)):
+        await asyncio.sleep(SIMPLIFY_POLL_S)
+        now = await _read(session, PAGE_MARK)
+        if isinstance(now, str) and now != before:
+            return True
+    return False
+
+
+async def _simplify_fill(session: Browser) -> str:
+    """The add-on's "Autofill This Page" pressed and waited for; what it did, in a line."""
+    before = await _read(session, FILLED)
+    clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
+    if clicked.isError:
+        return f"Simplify's button did not take the click: {tool_text(clicked)[:200]}. Do this page yourself."
+    await _simplify_filling(session, pressed=True)
     after = await _read(session, FILLED)
-    count = after - before if isinstance(after, int) and isinstance(before, int) else 0
-    return (
-        f"Simplify Copilot, a browser add-on, has just filled {max(count, 0)} fields of this form from the candidate's Simplify "
-        "profile, and may have attached a resume. Read the form before acting: keep what it filled when it is right, correct "
-        "what is wrong, and fill every required field it left empty. A resume it attached counts: upload the CV file only "
-        "when the resume field shows no file. Its panel at the side of the page is not part of the form: never use it."
-    )
+    count = max(after - before, 0) if isinstance(after, int) and isinstance(before, int) else 0
+    return f"Simplify filled {count} fields of this page from the candidate's Simplify profile, and attaches the resume where the page asks for one."
+
+
+async def simplify_act(session: Browser) -> tuple[str, bool]:
+    """Simplify Copilot does what its panel offers on this page, pressed with real clicks as a person would (the browser
+    refuses a click from script), and waited for: on an account page, the account made or signed in to and the application
+    opened, with its next page filled; on a form, the page filled. What the model is told, and whether an account was made."""
+    buttons = await _simplify_buttons(session, SIMPLIFY_PANEL_S)
+    if buttons is None:
+        return NO_PANEL, False
+    account = buttons.get("account-fill-button")
+    if isinstance(account, str) or "account-submit-button" in buttons:
+        signing = "sign in" in (account or "").lower()
+        if "account-submit-button" not in buttons:
+            clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_ACCOUNT})
+            if clicked.isError:
+                return f"Simplify's account button did not take the click: {tool_text(clicked)[:200]}. Do the account yourself.", False
+            for _ in range(int(SIMPLIFY_ACCOUNT_S / SIMPLIFY_POLL_S)):
+                await asyncio.sleep(SIMPLIFY_POLL_S)
+                if "account-submit-button" in ((await _read(session, SIMPLIFY_BUTTONS)) or {}):
+                    break
+            else:
+                return ("Simplify filled the account form with the candidate's email and a password it keeps, and offered no button "
+                        "to send it: press the page's own Create Account or Sign In button."), False
+        mark = await _read(session, PAGE_MARK)
+        clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_ACCOUNT_SEND})
+        if clicked.isError or not await _moved(session, mark):
+            return ("Simplify filled the account form and pressed it, but the page did not move on: read it. An error it shows "
+                    "(an account that already exists, a password refused) is for you to handle by the general rules."), False
+        await _simplify_filling(session, pressed=False)
+        done = "signed in to the candidate's account on this site" if signing else "created the candidate's account on this site"
+        return (f"Simplify {done}, with a password it keeps, and opened the application: on its next page it filled what it could. "
+                "Read the page and do only what it left."), not signing
+    if "fill-button" in buttons:
+        return await _simplify_fill(session), False
+    return NO_PANEL, False
+
+
+async def simplify_autofill(session: Browser) -> str:
+    """Simplify Copilot on the form's first page, before the model: what it did, for the brief; empty when there was no panel."""
+    words, _ = await simplify_act(session)
+    return "" if words == NO_PANEL else words
 
 
 async def run_on_page(
@@ -807,7 +919,7 @@ async def run_on_page(
     (`standing`, as standing.brief writes them), then the model from the CV and the answers for the rest."""
     brief = (
         f"The form: {job.apply_url}\nThe job: {job.title} at {job.company}\nThe CV file to upload: {cv_file}\n"
-        f"{_account_line(job, account)}\n\nThe CV:\n{cv_text}\n\nThe answers:\n{answers}"
+        f"{_account_line(job, account, simplify)}\n\nThe CV:\n{cv_text}\n\nThe answers:\n{answers}"
     )
     trial = dry_run()
     tracing = trial or bool(os.environ.get(TRACE_ENV, "").strip())
@@ -820,16 +932,19 @@ async def run_on_page(
         # The add-on fills what it can first, in seconds and with no model; the model checks it and does the rest.
         if told := NOTE.get():
             told("Simplify Copilot is filling the form…")
-        filled = await simplify_autofill(session)
+        filled, made = await simplify_act(session)
         if told:
             told("")
         if tracing:
-            traced.note(f"== simplify: {filled or 'no panel, or nothing filled'}")
-        if filled:
-            brief = f"{brief}\n\n{filled}"
+            traced.note(f"== simplify: {filled}")
+        brief = f"{brief}\n\n{SIMPLIFY_RULES}\n\nOn this first page: {filled}"
+    else:
+        made = False
     if standing:
         brief = f"{brief}\n\n{standing}"
-    report = await fill_form(session, tools, client, model, brief, guidance, page_rules)
+    report = await fill_form(session, tools, client, model, brief, guidance, page_rules, simplify)
+    if made:
+        report = replace(report, made_account=True)
     if tracing:
         traced.note(f"== finish_form: {json.dumps(asdict(report), ensure_ascii=False)[:500]}")
     if report.status != "ready" or not report.submit_selector:
@@ -849,7 +964,7 @@ async def run_on_page(
             "fields, then call finish_form again. A field that would need a fact about the candidate that the CV and the answers do "
             "not give ends the form as blocked, with that field named."
         )
-        again = await fill_form(session, tools, client, model, refusal, guidance, page_rules)
+        again = await fill_form(session, tools, client, model, refusal, guidance, page_rules, simplify)
         report = replace(again, steps=report.steps + again.steps, made_account=report.made_account or again.made_account, asked=report.asked + again.asked)
         if tracing:
             traced.note(f"== finish_form again: {json.dumps(asdict(report), ensure_ascii=False)[:500]}")
@@ -1009,12 +1124,18 @@ def site_of(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
 
-def _account_line(job: Job, account: tuple[str, str] | None) -> str:
-    """What the model is told about an account on this site: the one it made and when, or that there is none yet."""
+def _account_line(job: Job, account: tuple[str, str] | None, simplify: bool = False) -> str:
+    """What the model is told about an account on this site: the one it made and when, or that there is none yet. With
+    Simplify Copilot, the add-on makes the account and signs in first, and the account_password is what is left when it cannot."""
     site = site_of(job.apply_url)
     if account is None:
+        if simplify:
+            return f"No account of yours is known on {site}: if the form needs one, let simplify_fill make it on the account page."
         return f"No account of yours is known on {site}: if the form needs one, make it."
     email, made_at = account
+    if simplify:
+        return (f"Your account on {site}: made on {made_at[:10]} with {email}. On the sign-in page call simplify_fill first; if "
+                "Simplify cannot sign in, use the account_password from the answers.")
     return f"Your account on {site}: made on {made_at[:10]} with {email}, and the account_password from the answers."
 
 
