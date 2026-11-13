@@ -218,6 +218,21 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .manual-list li:first-child { border-top: 0; }
 .manual-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .manual-actions a { color: var(--accent); text-decoration: none; font-size: 13px; }
+.who-pick { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 860px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.row input[type="text"], .row input[type="password"] { flex: 1 1 160px; min-width: 0; border: 1px solid var(--border); background: var(--page); border-radius: 8px; padding: 6px 8px; }
+.row input[type="file"] { flex: 1 1 200px; min-width: 0; font-size: 13px; }
+.status { font-size: 12px; color: var(--good-text); margin: 8px 0 0; min-height: 1em; }
+.status.err { color: var(--critical); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chips span { border: 1px solid var(--border); border-radius: 999px; padding: 1px 10px; font-size: 12px; color: var(--text-2); }
+.answers { width: 100%; min-width: 0; }
+.answers td { padding: 6px 8px; overflow-wrap: anywhere; }
+.answers td:last-child { white-space: nowrap; text-align: right; }
+.search-box { margin-bottom: 12px; }
+.search-box .drawer-head { align-items: center; }
 .progress { margin-bottom: 16px; }
 .progress .now { font-weight: 600; }
 .progress .note { color: var(--text-2); font-size: 13px; margin-top: 2px; }
@@ -242,15 +257,83 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
       <h1>投递看板</h1>
       <p class="sub" id="updated">读取中…</p>
     </div>
-    <button class="btn" id="refresh" type="button">刷新</button>
+    <div class="head-actions">
+      <label class="who-pick"><span class="muted">用户</span>
+        <select class="pick" id="user-pick" aria-label="当前用户"></select>
+      </label>
+      <button class="btn" id="user-add" type="button">新建用户</button>
+      <button class="btn" id="refresh" type="button">刷新</button>
+    </div>
   </header>
 
   <nav class="tabs" role="tablist" aria-label="视图">
     <button class="tab" role="tab" id="tab-apps" aria-controls="view-apps" aria-selected="true" type="button">申请记录<span class="count" id="count-apps"></span></button>
     <button class="tab" role="tab" id="tab-jobs" aria-controls="view-jobs" aria-selected="false" type="button">找到的职位<span class="count" id="count-jobs"></span></button>
+    <button class="tab" role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" type="button">设置</button>
   </nav>
 
+  <section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+    <div id="settings-guide"></div>
+    <div class="settings-grid">
+      <section class="card" aria-labelledby="s-resume-title">
+        <div class="card-head"><h2 id="s-resume-title">简历</h2><p class="hint">AIHawk 从简历里读出要搜索的职位、地点和联系方式。换简历会清掉还没申请的旧职位，重新搜索。</p></div>
+        <div id="s-resume"></div>
+        <div class="row">
+          <input type="file" id="s-resume-file" accept=".pdf,.docx,.txt,.md">
+          <button class="btn primary" id="s-resume-go" type="button">上传并搜索</button>
+        </div>
+        <p class="status" id="s-resume-status" aria-live="polite"></p>
+      </section>
+      <section class="card" aria-labelledby="s-search-title">
+        <div class="card-head"><h2 id="s-search-title">搜索设置</h2><p class="hint">用逗号分隔多个词。保存后会重新搜索。</p></div>
+        <div class="form">
+          <label class="full">地点<input id="s-places" type="text" placeholder="例如：Bethlehem, Allentown, United States"></label>
+          <label class="full">排除职位里含有的词<input id="s-exclude" type="text" placeholder="例如：Intern, Sales"></label>
+          <label>只看最近几天发布的<input id="s-days" type="number" min="1" max="60"></label>
+          <div class="form-actions full"><button class="btn primary" id="s-search-save" type="button">保存并重新搜索</button><span class="status" id="s-search-status" aria-live="polite"></span></div>
+        </div>
+      </section>
+      <section class="card" aria-labelledby="s-mail-title">
+        <div class="card-head"><h2 id="s-mail-title">邮箱</h2><p class="hint">申请表用这个邮箱。有的网站会发验证码，AIHawk 要能打开你的收件箱读取：先在它的浏览器里登录一次。</p></div>
+        <div class="form">
+          <label class="full">邮箱地址<input id="s-email" type="email" placeholder="you@gmail.com"></label>
+          <label>邮箱服务<select id="s-provider"><option value="">按地址判断</option><option value="gmail">Gmail</option><option value="outlook">Outlook</option></select></label>
+          <div class="form-actions full"><button class="btn" id="s-mail-save" type="button">保存</button><button class="btn primary" id="s-mail-signin" type="button">打开浏览器登录邮箱</button><span class="status" id="s-mail-status" aria-live="polite"></span></div>
+        </div>
+      </section>
+      <section class="card" aria-labelledby="s-answers-title">
+        <div class="card-head"><h2 id="s-answers-title">我的回答</h2><p class="hint">填表时告诉 AI 的信息，例如工作签证、期望薪资、到岗时间。简历里没写、表格又必填的，写在这里。</p></div>
+        <div id="s-answers"></div>
+        <div class="row">
+          <input id="s-answer-name" type="text" placeholder="名称，例如 notice period" aria-label="回答的名称">
+          <input id="s-answer-value" type="text" placeholder="内容，例如 one month" aria-label="回答的内容">
+          <button class="btn" id="s-answer-add" type="button">添加</button>
+        </div>
+        <p class="status" id="s-answers-status" aria-live="polite"></p>
+      </section>
+      <section class="card" aria-labelledby="s-key-title">
+        <div class="card-head"><h2 id="s-key-title">OrcaRouter key（所有用户共用）</h2><p class="hint">读简历、打分和填表都用它，费用记在这个 key 的账户上。</p></div>
+        <p id="s-key-state"></p>
+        <div class="row">
+          <input id="s-key" type="password" autocomplete="off" placeholder="sk-orca-…" aria-label="OrcaRouter key">
+          <button class="btn" id="s-key-save" type="button">检查并保存</button>
+        </div>
+        <p class="status" id="s-key-status" aria-live="polite"></p>
+      </section>
+      <section class="card" aria-labelledby="s-user-title">
+        <div class="card-head"><h2 id="s-user-title">用户</h2><p class="hint">每个用户的简历、职位、申请和浏览器登录都是分开的。</p></div>
+        <div class="row">
+          <input id="s-user-name" type="text" maxlength="40" aria-label="用户名字">
+          <button class="btn" id="s-user-rename" type="button">改名</button>
+        </div>
+        <p class="hint" id="s-user-folder"></p>
+        <p class="status" id="s-user-status" aria-live="polite"></p>
+      </section>
+    </div>
+  </section>
+
   <section id="view-jobs" role="tabpanel" aria-labelledby="tab-jobs" hidden>
+    <div class="card search-box" id="search-box"></div>
     <div id="job-notices"></div>
     <div class="card progress" id="progress" hidden></div>
     <div class="filters">
@@ -405,7 +488,7 @@ function hideTip() { tip.hidden = true; }
 // ---------- data ----------
 async function load() {
   try {
-    const response = await fetch("/api/data", { cache: "no-store" });
+    const response = await apiFetch("/api/data", { cache: "no-store" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.status);
     state.items = body.items;
@@ -426,6 +509,8 @@ async function load() {
 // The line under the title speaks of the view shown: the applications, or the jobs found.
 function renderSubtitle() {
   const line = document.getElementById("updated");
+  const person = typeof currentPerson === "function" && people.current ? currentPerson() : null;
+  if (state.view === "settings") { line.textContent = person ? `${person.name} 的设置` : "还没有用户"; return; }
   const [error, at, what] = state.view === "jobs"
     ? [jobs.loadError, jobs.loadedAt, `共 ${jobs.items.length} 个职位，已打分 ${jobs.items.filter(item => typeof item.score === "number").length} 个`]
     : [state.loadError, state.loadedAt, `共 ${state.items.length} 条记录`];
@@ -687,7 +772,7 @@ async function openDrawer(id) {
     status.className = "saved";
     status.textContent = "保存中…";
     try {
-      const response = await fetch(`/api/job?id=${encodeURIComponent(id)}`, {
+      const response = await apiFetch(`/api/job?id=${encodeURIComponent(id)}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ stage: stageSelect.value, next_date: dateInput.value, next_event: eventInput.value, notes: notes.value }),
       });
@@ -716,7 +801,7 @@ async function openDrawer(id) {
     ["匹配分", typeof item.score === "number" ? `${item.score.toFixed(1)} / 5` : "—"],
     ["花费", money(item.cost)],
   ];
-  const shotUrl = `/api/proof?id=${encodeURIComponent(id)}`;
+  const shotUrl = `/api/proof?id=${encodeURIComponent(id)}&user=${encodeURIComponent(people.current)}`;
   fill(drawer,
     el("div", { class: "drawer-head" },
       el("div", {}, el("h2", { id: "d-title", text: item.title }), el("div", { class: "muted", text: [item.company, item.location].filter(Boolean).join(" · ") })),
@@ -746,7 +831,7 @@ async function openDrawer(id) {
   drawer.querySelector("button").focus();
 
   try {
-    const response = await fetch(`/api/job?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    const response = await apiFetch(`/api/job?id=${encodeURIComponent(id)}`, { cache: "no-store" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.status);
     if (state.openId !== id) return;
@@ -774,15 +859,28 @@ document.addEventListener("keydown", e => {
 // ---------- views ----------
 function showView(view) {
   state.view = view;
-  for (const [name, tab, panel] of [["apps", "tab-apps", "view-apps"], ["jobs", "tab-jobs", "view-jobs"]]) {
+  for (const [name, tab, panel] of [["apps", "tab-apps", "view-apps"], ["jobs", "tab-jobs", "view-jobs"], ["settings", "tab-settings", "view-settings"]]) {
     document.getElementById(tab).setAttribute("aria-selected", String(view === name));
     document.getElementById(panel).hidden = view !== name;
   }
   // A link to one application (#job=…) is kept: load() opens it once the records are here.
-  if (drawer.hidden && !location.hash.startsWith("#job=")) history.replaceState(null, "", view === "jobs" ? "#jobs" : location.pathname);
+  if (drawer.hidden && !location.hash.startsWith("#job=")) history.replaceState(null, "", `${location.pathname}${location.search}${view === "apps" ? "" : `#${view}`}`);
   if (view === "apps") renderDaily();
+  if (view === "settings") loadProfile();
   renderSubtitle();
 }
+
+// ---------- who is using it ----------
+// The page serves one person at a time: every request names them, except the few shared by everyone.
+const SHARED = new Set(["/api/users", "/api/key"]);
+const people = { list: [], current: "", keySet: false };
+function apiFetch(url, options) {
+  const path = url.split("?")[0];
+  if (SHARED.has(path) || !people.current) return fetch(url, options);
+  return fetch(`${url}${url.includes("?") ? "&" : "?"}user=${encodeURIComponent(people.current)}`, options);
+}
+function readLocal(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }
+function writeLocal(key, value) { try { localStorage.setItem(key, value); } catch { /* remembered for this visit only */ } }
 
 // ---------- jobs found ----------
 const PAGE_ROWS = 200;
@@ -791,7 +889,7 @@ const confirmBox = document.getElementById("confirm");
 
 async function loadFound() {
   try {
-    const response = await fetch("/api/found", { cache: "no-store" });
+    const response = await apiFetch("/api/found", { cache: "no-store" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.status);
     jobs.items = body.items;
@@ -816,7 +914,10 @@ async function loadFound() {
 // Refresh reads both lists again and says what changed, so a click that finds nothing new still answers.
 async function refresh() {
   const button = document.getElementById("refresh");
-  if (button.disabled) return;
+  if (button.disabled || !people.current) return;
+  loadSearch();
+  loadUsers().catch(() => {});
+  if (state.view === "settings") loadProfile();
   const before = { found: jobs.items.length, scored: jobs.items.filter(item => typeof item.score === "number").length, apps: state.items.length };
   button.disabled = true;
   button.textContent = "刷新中…";
@@ -978,7 +1079,7 @@ async function openJobDrawer(id, keepScroll = false) {
   drawer.scrollTop = keepScroll ? scroll : 0;
   if (!keepScroll) drawer.querySelector("button").focus();
   try {
-    const response = await fetch(`/api/found/job?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+    const response = await apiFetch(`/api/found/job?id=${encodeURIComponent(id)}`, { cache: "no-store" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.status);
     if (state.openJobId !== id) return;
@@ -997,14 +1098,13 @@ function chosenJobs() {
 
 // ---------- applying yourself ----------
 // The jobs whose link you opened to apply yourself, until you say you did or did not: kept in this browser only.
-const MANUAL_KEY = "aihawk.manualPending";
+// One list per person: someone else's open links are not theirs to confirm.
+const manualKey = () => `aihawk.manualPending.${people.current}`;
 function readPending() {
-  try { return new Set(JSON.parse(localStorage.getItem(MANUAL_KEY) || "[]")); } catch { return new Set(); }
+  try { return new Set(JSON.parse(readLocal(manualKey(), "[]"))); } catch { return new Set(); }
 }
-function savePending() {
-  try { localStorage.setItem(MANUAL_KEY, JSON.stringify([...jobs.pending])); } catch { /* kept for this visit only */ }
-}
-jobs.pending = readPending();
+function savePending() { writeLocal(manualKey(), JSON.stringify([...jobs.pending])); }
+jobs.pending = new Set();
 
 function openManual(item) {
   const href = safeHref(item.url);
@@ -1024,7 +1124,7 @@ function dropPending(id) {
 async function markManualDone(item, button) {
   if (button) button.disabled = true;
   try {
-    const response = await fetch(`/api/manual?id=${encodeURIComponent(item.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const response = await apiFetch(`/api/manual?id=${encodeURIComponent(item.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.status);
     jobs.pending.delete(item.id);
@@ -1042,7 +1142,7 @@ async function undoManual(item, button) {
   if (!confirm(`把「${item.company} · ${item.title}」放回找到的职位？\n\n这只会撤销看板里的记录，你在网站上提交的申请不会因此撤回。这条记录的跟进状态和备注也会删除。`)) return;
   button.disabled = true;
   try {
-    const response = await fetch(`/api/manual/undo?id=${encodeURIComponent(item.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const response = await apiFetch(`/api/manual/undo?id=${encodeURIComponent(item.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || response.status);
     closeDrawer();
@@ -1062,7 +1162,7 @@ function openConfirm(only) {
     go.disabled = true;
     status.textContent = "";
     try {
-      const response = await fetch("/api/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: list.map(item => item.id) }) });
+      const response = await apiFetch("/api/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: list.map(item => item.id) }) });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || response.status);
       jobs.send = body;
@@ -1098,7 +1198,7 @@ let pollTimer = null;
 async function pollSend() {
   clearTimeout(pollTimer);
   try {
-    const response = await fetch("/api/apply", { cache: "no-store" });
+    const response = await apiFetch("/api/apply", { cache: "no-store" });
     const body = await response.json();
     if (response.ok) {
       const wasRunning = sending();
@@ -1124,13 +1224,13 @@ function renderProgress() {
   const stop = el("button", { class: "btn", type: "button", disabled: send.stopping, text: send.stopping ? "发完这份后停止…" : "发完这份后停止" });
   stop.addEventListener("click", async () => {
     stop.disabled = true;
-    try { const r = await fetch("/api/apply/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { stop.disabled = false; }
+    try { const r = await apiFetch("/api/apply/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { stop.disabled = false; }
   });
   const end = el("button", { class: "btn danger", type: "button", disabled: send.terminating, text: send.terminating ? "正在终止…" : "立即终止" });
   end.addEventListener("click", async () => {
     if (!confirm("立即终止正在进行的申请，并关闭它的浏览器？\n\n如果它正好已经点了提交按钮，这份申请可能已经发出。被终止的职位会记为「未发出：被你终止」，不会自动重发。")) return;
     end.disabled = true;
-    try { const r = await fetch("/api/apply/terminate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { end.disabled = false; }
+    try { const r = await apiFetch("/api/apply/terminate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { end.disabled = false; }
   });
   const hide = el("button", { class: "btn", type: "button", text: "收起", onclick: () => { jobs.send = null; renderProgress(); } });
   fill(box,
@@ -1155,8 +1255,324 @@ function summaryWords(results) {
   return [[sentCount, "已发送并确认"], [unsure, "已发送未确认"], [notSent, "未发出"]].filter(([c]) => c).map(([c, w]) => `${c} 份${w}`).join("，") || "没有发送";
 }
 
+// ---------- people ----------
+async function loadUsers() {
+  const response = await fetch("/api/users", { cache: "no-store" });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || response.status);
+  people.list = body.users;
+  people.keySet = body.key_set;
+  renderUserPick();
+  return body;
+}
+function currentPerson() { return people.list.find(person => person.id === people.current); }
+function renderUserPick() {
+  const pick = document.getElementById("user-pick");
+  pick.replaceChildren(...people.list.map(person =>
+    el("option", { value: person.id, selected: person.id === people.current, text: person.has_resume ? person.name : `${person.name}（未设置）` })));
+  pick.disabled = !people.list.length;
+}
+async function switchUser(id, view) {
+  people.current = id;
+  writeLocal("aihawk.user", id);
+  const url = new URL(location.href);
+  url.searchParams.set("user", id);
+  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  // Nothing of the last person's stays on the page.
+  if (!confirmBox.hidden) closeConfirm();
+  if (!drawer.hidden) closeDrawer();
+  state.items = [];
+  jobs.items = [];
+  jobs.meta = {};
+  jobs.selected.clear();
+  jobs.pending = readPending();
+  jobs.send = null;
+  jobs.flash = "";
+  search.state = null;
+  settings.profile = null;
+  clearTimeout(settings.mailTimer);
+  for (const line of document.querySelectorAll("#view-settings .status")) { line.textContent = ""; line.className = "status"; }
+  for (const box of document.querySelectorAll("#view-settings input")) box.value = "";
+  renderUserPick();
+  const person = currentPerson();
+  showView(view || (person && !person.has_resume ? "settings" : state.view || "apps"));
+  await Promise.all([load(), loadFound(), loadSearch()]);
+  pollSend();
+}
+async function addUser() {
+  const name = prompt("新用户的名字：");
+  if (!name || !name.trim()) return;
+  try {
+    const response = await fetch("/api/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    await loadUsers();
+    await switchUser(body.id, "settings");
+  } catch (error) {
+    alert(`没有建立：${error.message}`);
+  }
+}
+async function post(path, payload) {
+  const response = await apiFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload || {}) });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || response.status);
+  return body;
+}
+function setStatus(id, text, bad = false) {
+  const node = document.getElementById(id);
+  node.textContent = text;
+  node.className = bad ? "status err" : "status";
+}
+
+// ---------- one person's settings ----------
+const settings = { profile: null, mailTimer: null };
+async function loadProfile() {
+  if (!people.current) return;
+  try {
+    const response = await apiFetch("/api/profile", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    settings.profile = body;
+    people.keySet = body.key_set;
+    renderSettings(true);
+  } catch (error) {
+    setStatus("s-resume-status", `读取失败：${error.message}`, true);
+  }
+}
+function renderSettings(fillInputs = false) {
+  const profile = settings.profile;
+  if (!profile) return;
+  const person = currentPerson();
+  const steps = [];
+  if (!people.keySet) steps.push("填写下面的 OrcaRouter key（所有用户共用，只需要填一次）");
+  if (!profile.has_resume) steps.push("上传简历：AIHawk 会读出要找的职位，然后开始搜索和打分");
+  if (!profile.email) steps.push("可选：填写邮箱并在浏览器里登录一次，网站发验证码时 AIHawk 才能读到");
+  fill(document.getElementById("settings-guide"), (!people.keySet || !profile.has_resume) ? el("div", { class: "notice" },
+    el("b", { text: `${person ? person.name : ""}，开始前还需要：` }), el("ol", {}, ...steps.map(step => el("li", { text: step })))) : null);
+  fill(document.getElementById("s-resume"), profile.has_resume
+    ? el("dl", { class: "facts" },
+      el("dt", { text: "当前简历" }), el("dd", { text: profile.resume_name || "已读入" }),
+      el("dt", { text: "目标" }), el("dd", { text: profile.goals || "—" }),
+      el("dt", { text: "搜索的职位" }), el("dd", {}, el("div", { class: "chips" }, ...profile.titles.flatMap(node => node.forms).slice(0, 24).map(text => el("span", { text })))))
+    : el("p", { class: "muted", text: "还没有简历。" }));
+  document.getElementById("s-resume-go").textContent = profile.has_resume ? "换简历并重新搜索" : "上传并搜索";
+  if (fillInputs) {
+    document.getElementById("s-places").value = profile.places.join(", ");
+    document.getElementById("s-exclude").value = profile.exclude.join(", ");
+    document.getElementById("s-days").value = profile.max_age_days;
+    document.getElementById("s-email").value = profile.email;
+    document.getElementById("s-provider").value = ["gmail", "outlook"].includes(profile.mail_provider) ? profile.mail_provider : "";
+    document.getElementById("s-user-name").value = person ? person.name : "";
+  }
+  document.getElementById("s-search-save").disabled = !profile.has_resume;
+  renderMail(profile.mail_sign_in);
+  const answers = Object.entries(profile.answers);
+  fill(document.getElementById("s-answers"), answers.length
+    ? el("table", { class: "answers" }, el("tbody", {}, ...answers.map(([name, value]) => el("tr", {},
+      el("td", { class: "muted", text: name.replaceAll("_", " ") }), el("td", { text: value }),
+      el("td", {}, el("button", { class: "btn", type: "button", text: "修改", onclick: () => editAnswer(name, value) }), " ",
+        el("button", { class: "btn", type: "button", text: "删除", onclick: () => saveAnswer(name, "") }))))))
+    : el("p", { class: "muted", text: "还没有。" }));
+  document.getElementById("s-key-state").textContent = people.keySet ? "已设置。要更换的话，在下面粘贴新的 key。" : "还没有设置：读简历、打分和申请都需要它。";
+}
+function renderMail(sign) {
+  const host = document.getElementById("s-mail-status");
+  const button = document.getElementById("s-mail-signin");
+  button.disabled = Boolean(sign && sign.running);
+  clearTimeout(settings.mailTimer);
+  if (!sign || sign.phase === "idle") { fill(host); return; }
+  host.className = sign.phase === "error" || (sign.phase === "done" && !sign.reached) ? "status err" : "status";
+  if (sign.phase === "opening") fill(host, "正在打开浏览器…");
+  else if (sign.phase === "waiting") {
+    fill(host, "浏览器已打开：在里面登录邮箱，看到收件箱后点 ",
+      el("button", { class: "btn primary", type: "button", text: "我已登录", onclick: async e => { e.currentTarget.disabled = true; try { await post("/api/mail/signin/done"); } catch { /* the next look says */ } watchMail(); } }));
+  } else if (sign.phase === "checking") fill(host, "正在检查是否已进入收件箱…");
+  else if (sign.phase === "done") fill(host, sign.reached ? "已登录邮箱 ✓" : "还没有进入收件箱：请再点一次「打开浏览器登录邮箱」。");
+  else if (sign.phase === "error") fill(host, sign.error);
+  if (sign.running) settings.mailTimer = setTimeout(watchMail, 1500);
+}
+async function watchMail() {
+  try {
+    const response = await apiFetch("/api/profile", { cache: "no-store" });
+    const body = await response.json();
+    if (response.ok && settings.profile) { settings.profile.mail_sign_in = body.mail_sign_in; renderMail(body.mail_sign_in); }
+  } catch { settings.mailTimer = setTimeout(watchMail, 3000); }
+}
+function toBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+async function uploadResume(button) {
+  const input = document.getElementById("s-resume-file");
+  const file = input.files[0];
+  if (!file) return setStatus("s-resume-status", "先选择简历文件（PDF、Word .docx 或文本）。", true);
+  if (file.size > 10 * 1024 * 1024) return setStatus("s-resume-status", "简历文件要小于 10 MB。", true);
+  button.disabled = true;
+  setStatus("s-resume-status", "上传中…");
+  try {
+    search.state = await post("/api/resume", { name: file.name, data: await toBase64(file) });
+    input.value = "";
+    setStatus("s-resume-status", "已上传：正在读简历（约半分钟），然后搜索和打分。进度在「找到的职位」页。");
+    await loadUsers();
+    showView("jobs");
+    loadSearch();
+  } catch (error) {
+    setStatus("s-resume-status", `没有上传：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+const words = text => text.split(/[,，;；\n]/).map(word => word.trim()).filter(Boolean);
+async function saveSearch(button) {
+  button.disabled = true;
+  try {
+    settings.profile = { ...settings.profile, ...await post("/api/settings", {
+      places: words(document.getElementById("s-places").value), exclude: words(document.getElementById("s-exclude").value),
+      max_age_days: Number(document.getElementById("s-days").value) }) };
+    renderSettings(true);
+    setStatus("s-search-status", "已保存，正在重新搜索。");
+    loadSearch();
+  } catch (error) {
+    setStatus("s-search-status", `没有保存：${error.message}`, true);
+  } finally {
+    button.disabled = !settings.profile || !settings.profile.has_resume;
+  }
+}
+async function saveMail() {
+  try {
+    settings.profile = { ...settings.profile, ...await post("/api/mail", { email: document.getElementById("s-email").value, provider: document.getElementById("s-provider").value }) };
+    renderSettings(true);
+    setStatus("s-mail-status", ["gmail", "outlook"].includes(settings.profile.mail_provider) ? "已保存。" : "已保存。AIHawk 只能读取 Gmail 和 Outlook 的收件箱，其他邮箱的验证码要你自己处理。");
+  } catch (error) {
+    setStatus("s-mail-status", `没有保存：${error.message}`, true);
+  }
+}
+async function signInMail() {
+  try {
+    renderMail(await post("/api/mail/signin"));
+  } catch (error) {
+    setStatus("s-mail-status", error.message, true);
+  }
+}
+async function saveAnswer(name, value) {
+  try {
+    settings.profile = { ...settings.profile, ...await post("/api/answers", { name, value }) };
+    renderSettings();
+    setStatus("s-answers-status", value ? "已保存。" : "已删除。");
+    return true;
+  } catch (error) {
+    setStatus("s-answers-status", `没有保存：${error.message}`, true);
+    return false;
+  }
+}
+function editAnswer(name, value) {
+  const changed = prompt(`「${name.replaceAll("_", " ")}」的新内容（清空即删除）：`, value);
+  if (changed !== null) saveAnswer(name, changed.trim());
+}
+async function saveKey(button) {
+  const input = document.getElementById("s-key");
+  button.disabled = true;
+  setStatus("s-key-status", "正在检查…");
+  try {
+    await post("/api/key", { key: input.value });
+    input.value = "";
+    people.keySet = true;
+    setStatus("s-key-status", "已保存，所有用户都会用这个 key。");
+    renderSettings();
+    loadFound();
+  } catch (error) {
+    setStatus("s-key-status", `没有保存：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+async function renameUser() {
+  try {
+    await post("/api/users/rename", { name: document.getElementById("s-user-name").value });
+    await loadUsers();
+    setStatus("s-user-status", "已改名。");
+    renderSubtitle();
+  } catch (error) {
+    setStatus("s-user-status", `没有改名：${error.message}`, true);
+  }
+}
+
+// ---------- searching and scoring ----------
+const search = { state: null, timer: null };
+const megabytes = bytes => Math.round(bytes / 1048576);
+async function loadSearch() {
+  if (!people.current) return;
+  const asked = people.current;
+  try {
+    const response = await apiFetch("/api/search", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok || asked !== people.current) return;
+    const before = search.state;
+    search.state = body;
+    renderSearch();
+    const moved = before && ["running", "found", "new", "scored", "phase"].some(name => before[name] !== body[name]);
+    if (moved || (before && before.library && body.library && before.library.chunks[0] !== body.library.chunks[0])) {
+      loadFound();
+      if (before.running && !body.running) { loadUsers(); load(); }
+    }
+  } catch { /* the next look tries again */ }
+  clearTimeout(search.timer);
+  if (search.state && (search.state.running || (search.state.library && search.state.library.running))) search.timer = setTimeout(loadSearch, 2000);
+}
+function renderSearch() {
+  const box = document.getElementById("search-box");
+  const state_ = search.state;
+  if (!state_) { box.hidden = true; return; }
+  box.hidden = false;
+  const library = state_.library || {};
+  const person = currentPerson();
+  const hasResume = Boolean(person && person.has_resume);
+  const head = state_.running ? (state_.note || "正在搜索…")
+    : state_.phase === "error" ? state_.error
+    : state_.phase === "done" ? `搜索完成：新找到 ${state_.new} 个职位，本次打分 ${state_.scored} 个。`
+    : hasResume ? "需要新职位时点「重新搜索」；想多给一些职位打分，点「再打 200 个」。" : "还没有简历：去「设置」上传后就会开始搜索。";
+  const libraryLine = library.running && library.chunks && library.chunks[1]
+    ? `职位库下载中：${library.chunks[0]} / ${library.chunks[1]} 块${library.bytes && library.bytes[1] ? `，${megabytes(library.bytes[0])} / ${megabytes(library.bytes[1])} MB` : ""}`
+    : library.error ? `职位库：${library.error}` : "";
+  const again = el("button", { class: "btn", type: "button", disabled: state_.running || !hasResume, text: "重新搜索", onclick: () => startSearch("/api/search") });
+  const more = el("button", { class: "btn primary", type: "button", disabled: state_.running || !hasResume, text: "再打 200 个", onclick: () => startSearch("/api/score/more") });
+  fill(box,
+    el("div", { class: "drawer-head" },
+      el("div", {}, el("div", { class: state_.phase === "error" ? "now err" : "now", text: head }), libraryLine ? el("div", { class: "note muted", text: libraryLine }) : null),
+      el("div", { class: "head-actions" }, again, more)),
+    library.running && library.chunks && library.chunks[1] ? el("div", { class: "meter", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(library.chunks[1]), "aria-valuenow": String(library.chunks[0]) },
+      el("span", { style: `width: ${Math.round(100 * library.chunks[0] / library.chunks[1])}%` })) : null);
+}
+async function startSearch(path) {
+  try {
+    search.state = { ...await post(path), library: search.state && search.state.library };
+    renderSearch();
+    loadSearch();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 // ---------- wiring ----------
 document.getElementById("search").addEventListener("input", e => { state.search = e.target.value; renderChips(); renderTable(); });
+document.getElementById("user-pick").addEventListener("change", e => switchUser(e.target.value));
+document.getElementById("user-add").addEventListener("click", addUser);
+document.getElementById("tab-settings").addEventListener("click", () => showView("settings"));
+document.getElementById("s-resume-go").addEventListener("click", e => uploadResume(e.currentTarget));
+document.getElementById("s-search-save").addEventListener("click", e => saveSearch(e.currentTarget));
+document.getElementById("s-mail-save").addEventListener("click", saveMail);
+document.getElementById("s-mail-signin").addEventListener("click", signInMail);
+document.getElementById("s-answer-add").addEventListener("click", async () => {
+  const name = document.getElementById("s-answer-name"), value = document.getElementById("s-answer-value");
+  if (!name.value.trim() || !value.value.trim()) return setStatus("s-answers-status", "名称和内容都要填。", true);
+  if (await saveAnswer(name.value, value.value.trim())) { name.value = ""; value.value = ""; }
+});
+document.getElementById("s-key-save").addEventListener("click", e => saveKey(e.currentTarget));
+document.getElementById("s-user-rename").addEventListener("click", renameUser);
 document.getElementById("refresh").addEventListener("click", refresh);
 document.getElementById("tab-apps").addEventListener("click", () => showView("apps"));
 document.getElementById("tab-jobs").addEventListener("click", () => showView("jobs"));
@@ -1173,10 +1589,27 @@ document.getElementById("sel-clear").addEventListener("click", () => { jobs.sele
 document.getElementById("sel-send").addEventListener("click", openConfirm);
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDaily, 150); });
-setInterval(() => { if (!document.hidden) { load(); loadFound(); } }, 30000);
-showView(location.hash === "#jobs" ? "jobs" : "apps");
-load();
-loadFound().then(pollSend);
+setInterval(() => { if (!document.hidden && people.current) { load(); loadFound(); loadUsers().catch(() => {}); } }, 30000);
+
+async function boot() {
+  try {
+    await loadUsers();
+  } catch (error) {
+    document.getElementById("updated").replaceChildren(el("span", { class: "err", text: `读取失败：${error.message}` }));
+    return;
+  }
+  const asked = new URL(location.href).searchParams.get("user") || readLocal("aihawk.user", "");
+  const chosen = people.list.find(person => person.id === asked) || people.list[0];
+  if (!chosen) {
+    showView("settings");
+    document.getElementById("updated").textContent = "还没有用户";
+    fill(document.getElementById("settings-guide"), el("div", { class: "notice" }, "还没有用户。点右上角「新建用户」开始。"));
+    return;
+  }
+  const hash = location.hash.slice(1);
+  await switchUser(chosen.id, ["jobs", "settings"].includes(hash) ? hash : undefined);
+}
+boot();
 </script>
 </body>
 </html>

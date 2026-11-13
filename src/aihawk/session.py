@@ -39,7 +39,9 @@ Log = Callable[[str], None]
 BALANCE_PATH = "/tools/balance"
 
 class Session:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, library: Library | None = None) -> None:
+        """One person's search in `workspace`. `library` is a job database several people share, which this session reads but
+        does not own: its days and its downloads are the sharer's to decide and to stop. Without one, the session has its own."""
         self.workspace = workspace
         self.config = load_config(workspace)
         self.plugins: tuple[Plugin, ...] = load_plugins(workspace)
@@ -49,8 +51,10 @@ class Session:
         ensure_account_password(self.store)
         self._client: AsyncOpenAI | None = None
         # The job database on this computer, which a search reads and the chunks still coming add to.
-        self.library = Library(self.config.data_dir / "library")
-        self.library.days = self.config.max_age_days
+        self.shared_library = library is not None
+        self.library = library if library is not None else Library(self.config.data_dir / "library")
+        if not self.shared_library:
+            self.library.days = self.config.max_age_days
         errors.use(self.config.data_dir, self.config.api_key() or "")
         # How many jobs the whole database holds, once its manifest has been read.
         self.database_jobs = 0
@@ -61,8 +65,9 @@ class Session:
         self.browsers = 0
 
     def close(self) -> None:
-        # The downloads are AIHawk's: they do not go on when AIHawk is closed.
-        self.library.stopping.set()
+        # The downloads are AIHawk's: they do not go on when AIHawk is closed. A shared database's go on for the others.
+        if not self.shared_library:
+            self.library.stopping.set()
         if self.engine is not None and self.engine.poll() is None:
             self.engine.terminate()
         self.store.close()
@@ -199,8 +204,9 @@ class Session:
         still missing, one by one. `arrived` is told after each that changes what a search finds, `progress` how many chunks
         are here of how many. Both are told on the loop, which alone touches the screen."""
         loop = asyncio.get_running_loop()
-        # The days of this search, which may have changed in the settings since the last time.
-        self.library.days = self.config.max_age_days
+        # The days of this search, which may have changed in the settings since the last time. A shared database's are its sharer's.
+        if not self.shared_library:
+            self.library.days = self.config.max_age_days
         manifest = await asyncio.to_thread(load_manifest, self.config.database)
         self.database_jobs = int(manifest.get("rows_out") or 0)
         # The index and the description files read in place, before 2026-11-09: nothing reads them any more.

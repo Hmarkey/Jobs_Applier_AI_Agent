@@ -232,13 +232,13 @@ def test_only_a_mark_by_hand_can_be_undone(home: Path) -> None:
 
 
 def test_the_page_marks_and_unmarks_a_job_by_hand(server: Any) -> None:
-    status, body = call(f"{server.base}/api/manual?id={job('other').id}", {})
+    status, body = call(server.at(f"/api/manual?id={job('other').id}"), {})
     assert status == 200 and body["manual"]
-    status, body = call(f"{server.base}/api/manual?id={job('other').id}", {})
+    status, body = call(server.at(f"/api/manual?id={job('other').id}"), {})
     assert status == 404 and "申请过" in body["error"]
-    status, _ = call(f"{server.base}/api/manual/undo?id={job('other').id}", {})
+    status, _ = call(server.at(f"/api/manual/undo?id={job('other').id}"), {})
     assert status == 200
-    status, body = call(f"{server.base}/api/manual/undo?id={job('sent').id}", {})
+    status, body = call(server.at(f"/api/manual/undo?id={job('sent').id}"), {})
     assert status == 404 and "手动" in body["error"]
 
 
@@ -252,14 +252,19 @@ def test_a_failure_of_the_whole_batch_is_said_in_a_line(home: Path) -> None:
     assert "RuntimeError" in state["error"] and not state["running"]
 
 
+async def accept_any_key(key: str) -> str:
+    return ""
+
+
 @pytest.fixture
 def server(home: Path) -> Any:
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), lambda *args: None)  # type: ignore[arg-type]
     port = httpd.server_address[1]
-    data = dashboard.Data(home)
-    httpd.RequestHandlerClass = dashboard.handler(data, port, dashboard.Sender(home, data, FakeSession))
+    hub = dashboard.Hub(home.parent / "everyone", legacy=home, session=FakeSession, key_check=accept_any_key)
+    httpd.RequestHandlerClass = dashboard.handler(hub, port)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield SimpleNamespace(base=f"http://127.0.0.1:{port}", sender=httpd.RequestHandlerClass)
+    base = f"http://127.0.0.1:{port}"
+    yield SimpleNamespace(base=base, hub=hub, at=lambda path, user="me": f"{base}{path}{'&' if '?' in path else '?'}user={user}")
     httpd.shutdown()
     httpd.server_close()
 
@@ -276,26 +281,26 @@ def call(url: str, body: Any = None, headers: dict[str, str] | None = None) -> t
 
 
 def test_the_page_lists_the_jobs_found_and_a_posting(server: Any) -> None:
-    status, body = call(f"{server.base}/api/found")
+    status, body = call(server.at("/api/found"))
     assert status == 200 and len(body["items"]) == 5 and body["blocked"] == "" and body["batch"] == dashboard.BATCH
-    status, body = call(f"{server.base}/api/found/job?id={job('high').id}")
+    status, body = call(server.at(f"/api/found/job?id={job('high').id}"))
     assert status == 200 and body["description"] == "Build models."
 
 
 def test_the_page_starts_a_batch_and_reads_how_it_goes(server: Any) -> None:
-    status, body = call(f"{server.base}/api/apply", {"ids": [job("high").id]})
+    status, body = call(server.at("/api/apply"), {"ids": [job("high").id]})
     assert status == 202 and body["total"] == 1
     deadline = time.monotonic() + 10
-    while (state := call(f"{server.base}/api/apply")[1])["running"]:
+    while (state := call(server.at("/api/apply"))[1])["running"]:
         assert time.monotonic() < deadline
         time.sleep(0.02)
     assert state["results"][0]["status"] == "submitted"
 
 
 def test_sending_needs_json_from_this_page(server: Any) -> None:
-    status, _ = call(f"{server.base}/api/apply", {"ids": [job("high").id]}, {"Origin": "https://elsewhere.example"})
+    status, _ = call(server.at("/api/apply"), {"ids": [job("high").id]}, {"Origin": "https://elsewhere.example"})
     assert status == 403
-    status, _ = call(f"{server.base}/api/apply", {"ids": [job("high").id]}, {"Content-Type": "text/plain"})
+    status, _ = call(server.at("/api/apply"), {"ids": [job("high").id]}, {"Content-Type": "text/plain"})
     assert status == 403
-    status, body = call(f"{server.base}/api/apply", {"ids": [job("sent").id]})
+    status, body = call(server.at("/api/apply"), {"ids": [job("sent").id]})
     assert status == 404 and "申请过" in body["error"]
