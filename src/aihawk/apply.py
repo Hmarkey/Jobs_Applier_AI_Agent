@@ -275,6 +275,13 @@ You fill in one job application form in a browser, for the candidate, from the C
   "Apply with" Google, LinkedIn, Apple, Indeed or anything else, on any site. An account is made by hand on the site's own
   form, with the candidate's email and the account_password from the answers. The mailbox is only read, for a code or a
   confirmation link the site sent, as the instructions for that site say.
+- An account just made often works only once its email is confirmed: the page says to verify or activate the email, or
+  a sign-in soon after making it fails ("invalid", "not verified", "not activated", "check your email"). Then go to the
+  mailbox before anything else, as the mailbox instructions say: open the newest message from this site, go to its
+  confirmation link with browser_navigate, or type its code on the site. Then come back to the form's address and sign in
+  once more. Sign in at most once before the email is confirmed and once after; never make a second account. Never use
+  "Forgot password" or reset a password: it only locks the candidate out. An account that still does not sign in after
+  its email is confirmed, or whose message never comes, ends the form as blocked, saying so.
 - Stay on the form's own site, and on the mailbox when the instructions for that site send you there. Nowhere else: a
   search engine, another job board or another company's page is never part of filling this form. A posting that has
   closed is closed: report it blocked rather than going to look for it elsewhere.
@@ -576,6 +583,10 @@ async def fill_form(
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": words})
                 watch.saw(name, arguments, words + str(await _read(session, PAGE_MARK)))
                 continue
+            if await _resets_password(session, name, arguments):
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": RESET_REFUSAL})
+                watch.saw(name, arguments, RESET_REFUSAL)
+                continue
             if simplify and (check := kept_field_check(name, arguments)) and isinstance(label := await _read(session, check), str):
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": kept_refusal(label)})
                 watch.saw(name, arguments, kept_refusal(label))
@@ -811,7 +822,7 @@ presses it for you. These rules come before the general ones on accounts and on 
 do only what it left.
 - A create-account or sign-in page: call simplify_fill. Simplify makes the account or signs in, with a password it keeps, and \
 opens the application. Only when it says it offers nothing there, or the page did not move on, do it yourself: sign in with the \
-account_password from the answers, or create the account with it.
+account_password from the answers, or create the account with it. A page that asks to confirm the email after Simplify made the account, or a sign-in that fails soon after, means the account waits for its email: confirm it from the mailbox first, as the rule on new accounts says, then call simplify_fill on the sign-in page again.
 - The resume: Simplify attaches it. Never upload the CV file where a resume is already attached; upload it yourself only \
 when the resume field still shows no file after simplify_fill.
 - Never change what Simplify filled, even when its answer looks wrong or belongs to another question: not its text, its \
@@ -890,6 +901,47 @@ def kept_field_check(name: str, arguments: dict[str, Any]) -> str | None:
     if name == "browser_click_at":
         return f"{_KEPT_FIELD}(null, {float(arguments.get('x', 0))}, {float(arguments.get('y', 0))}, false)"
     return f"{_KEPT_FIELD}({json.dumps(str(arguments.get('selector', '')))}, null, null, false)"
+
+
+# A step towards resetting the candidate's password, in what it presses or opens with the letters alone kept: "Forgot your
+# password?", Workday's forgotPasswordLink, /password/reset. The account's password is the one in the answers (or Simplify's),
+# and a reset only locks the person out of it.
+RESETS_PASSWORD = re.compile(r"(forgot|reset|recover)(your|my|the)?password|password(reset|recovery)|forgotpw|resetpw")
+RESET_REFUSAL = (
+    "Not done: a password is never reset or recovered here. If the account was just made, it is waiting for its email to be "
+    "confirmed: read the mailbox as the mailbox instructions say, open the confirmation link or type the code, then sign in "
+    "once more. If it still does not sign in, call finish_form with status blocked and say so."
+)
+# What a click would press, in words: the control's text, its address, its id and its names.
+_TARGET_WORDS = (
+    "((selector, x, y) => { let node = null;"
+    " try { node = x !== null ? document.elementFromPoint(x, y) : document.querySelector(selector); } catch (error) { return ''; }"
+    " if (!node) return ''; const control = node.closest('a, button, [role=button], [role=link], input[type=submit]');"
+    # Not in a control: its own names only, never the text of a whole box that may hold a "Forgot password?" link.
+    " if (!control) return [node.id, node.getAttribute('name'), node.getAttribute('aria-label')].filter(Boolean).join(' ');"
+    " return [control.innerText, control.value, control.getAttribute('href'), control.id, control.getAttribute('aria-label'),"
+    " control.getAttribute('data-automation-id'), control.getAttribute('name')].filter(Boolean).join(' '); })"
+)
+
+
+def resets_password(words: str) -> bool:
+    return bool(RESETS_PASSWORD.search(re.sub(r"[^a-z]", "", words.lower())))
+
+
+async def _resets_password(session: Browser, name: str, arguments: dict[str, Any]) -> bool:
+    """Whether this step would open a password reset: an address that is one, or a control that leads to one."""
+    if name == "browser_navigate":
+        return resets_password(str(arguments.get("url", "")))
+    if name == "browser_click":
+        selector = str(arguments.get("selector", ""))
+        if resets_password(selector):
+            return True
+        words = await _read(session, f"{_TARGET_WORDS}({json.dumps(selector)}, null, null)")
+    elif name == "browser_click_at":
+        words = await _read(session, f"{_TARGET_WORDS}(null, {float(arguments.get('x', 0))}, {float(arguments.get('y', 0))})")
+    else:
+        return False
+    return isinstance(words, str) and resets_password(words)
 
 
 def kept_refusal(label: str) -> str:
@@ -1305,7 +1357,7 @@ def _account_line(job: Job, account: tuple[str, str] | None, simplify: bool = Fa
     email, made_at = account
     if simplify:
         return (f"Your account on {site}: made on {made_at[:10]} with {email}. On the sign-in page call simplify_fill first; if "
-                "Simplify cannot sign in, use the account_password from the answers.")
+                "Simplify cannot sign in, try the account_password from the answers once.")
     return f"Your account on {site}: made on {made_at[:10]} with {email}, and the account_password from the answers."
 
 

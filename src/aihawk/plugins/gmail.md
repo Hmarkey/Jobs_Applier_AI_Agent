@@ -2,7 +2,7 @@
 name: gmail
 when: always
 ---
-Use this only when the form, or the site it belongs to, asks for a code or a confirmation link that it sent by email.
+Use this only when the form, or the site it belongs to, asks for a code or a confirmation link that it sent by email, or when an account just made on the site does not sign in until its email is confirmed.
 
 The mailbox is the candidate's own and already signed in, at `https://mail.google.com/mail/u/0/`. Gmail searches through its address, `#search/<query>` after `u/0/`, url-encoded, so `#search/subject%3A%22verification+code%22` and `#search/from%3Aexample.com` both work. The tools drive one page and there are no tabs. You have no clock of your own: read `new Date()` with browser_evaluate when a message's age decides whether it is the right one.
 

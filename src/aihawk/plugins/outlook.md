@@ -2,7 +2,7 @@
 name: outlook
 when: always
 ---
-Use this only when the form, or the site it belongs to, asks for a code or a confirmation link that it sent by email.
+Use this only when the form, or the site it belongs to, asks for a code or a confirmation link that it sent by email, or when an account just made on the site does not sign in until its email is confirmed.
 
 The mailbox is the candidate's own and already signed in, at `https://outlook.live.com/mail/`. Searching here is done on the page, not through the address: type into the search box at the top with browser_type and click the search button beside it, because Enter there is refused. The search matches the words inside messages as well as their senders, so a message that merely mentions the site is not the site's. The tools drive one page and there are no tabs. You have no clock of your own: read `new Date()` with browser_evaluate when a message's age decides whether it is the right one.
 

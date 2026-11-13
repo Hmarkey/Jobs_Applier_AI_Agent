@@ -17,12 +17,14 @@ from aihawk import apply as apply_module
 from aihawk.apply import (
     LOOP_STOP,
     PAGE_CHARS,
+    RESET_REFUSAL,
     SYSTEM,
     Outcome,
     Report,
     apply_to_job,
     fill_form,
     instructions,
+    resets_password,
     run_on_page,
     server_parameters,
     sign_in,
@@ -1064,3 +1066,52 @@ def test_a_code_that_never_comes_leaves_the_form_unconfirmed_and_never_blocked(t
     outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png"))  # type: ignore[arg-type]
     assert outcome.status == "unconfirmed" and browser.clicks() == ["#send"]
     assert "no code arrived" in outcome.summary
+
+
+# ---------- an account that waits for its email ----------
+
+
+@pytest.mark.parametrize("words", ["Forgot your password?", "forgotPasswordLink", "https://jobs.example.com/password/reset?x=1",
+                                   "text=Reset Password", "a[href*='forgot-password']", "Recover password"])
+def test_a_step_towards_a_password_reset_is_known(words: str) -> None:
+    assert resets_password(words)
+
+
+@pytest.mark.parametrize("words", ["Sign In", "#password", "Create Account", "Password", "#verifyPassword", "Reset filters", ""])
+def test_other_steps_are_not_taken_for_a_password_reset(words: str) -> None:
+    assert not resets_password(words)
+
+
+def test_the_rules_send_a_new_account_to_the_mailbox_and_never_to_a_reset() -> None:
+    rules = " ".join(SYSTEM.split())
+    assert "confirmation link with browser_navigate" in rules and 'Never use "Forgot password" or reset a password' in rules
+
+
+class PointedBrowser(ScriptedBrowser):
+    """What lies at a point on the page is Workday's "Forgot password?" link."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> SimpleNamespace:
+        if name == "browser_evaluate" and "elementFromPoint(x, y)" in (arguments or {}).get("expression", "") and "(null, 10.0, 20.0)" in arguments["expression"]:
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text=json.dumps("Forgot password? forgotPasswordLink"))])
+        return await super().call_tool(name, arguments)
+
+
+@pytest.mark.parametrize("step", [tool_call("browser_click", selector="#help"), tool_call("browser_click_at", x=10, y=20),
+                                  tool_call("browser_navigate", url="https://jobs.example.com/forgot-password")])
+def test_a_password_reset_is_refused_and_the_model_told_to_confirm_the_email(step: Any) -> None:
+    # The control at #help, or at the point clicked, is the site's "Forgot password?" link.
+    browser = PointedBrowser({"#help": "Forgot password?"})
+    model = ScriptedModel([step], [tool_call("finish_form", status="blocked", summary="not activated", submit_selector="")])
+    report = asyncio.run(fill_form(browser, [], model, "m", "brief"))  # type: ignore[arg-type]
+    assert report.status == "blocked"
+    assert not any(name in ("browser_click", "browser_click_at", "browser_navigate") for name, _ in browser.calls)
+    told = [m["content"] for m in model.requests[-1]["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
+    assert told == [RESET_REFUSAL]
+
+
+def test_a_click_on_anything_else_goes_through() -> None:
+    browser = ScriptedBrowser({"#signin": "Sign In"})
+    model = ScriptedModel([tool_call("browser_click", selector="#signin")], [tool_call("finish_form", status="blocked", summary="x", submit_selector="")])
+    asyncio.run(fill_form(browser, [], model, "m", "brief"))  # type: ignore[arg-type]
+    assert browser.clicks() == ["#signin"]
