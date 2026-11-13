@@ -757,7 +757,7 @@ SIMPLIFY_STARTS_S = 3.0
 SIMPLIFY_BUTTONS = (
     "(() => { const roots = [document]; let panel = false; for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*'))"
     " if (node.shadowRoot) { roots.push(node.shadowRoot); if (String(node.className).includes('simplify')) panel = true; }"
-    " const found = {}; for (const root of roots.slice(1)) for (const id of ['fill-button', 'account-fill-button', 'account-submit-button']) {"
+    " const found = {}; for (const root of roots.slice(1)) for (const id of ['fill-button', 'account-fill-button', 'account-submit-button', 'start-application-button']) {"
     " const button = root.getElementById ? root.getElementById(id) : root.querySelector('#' + id);"
     " if (button) found[id] = (button.innerText || button.textContent || '').trim().replace(/\\s+/g, ' ')"
     " + (button.disabled || button.getAttribute('aria-disabled') === 'true' ? ' [disabled]' : ''); }"
@@ -772,7 +772,12 @@ PASSWORDS_FILLED = (
 DISABLED = " [disabled]"
 # Where the browser is, as far as telling that a page moved on: the address and the page's headings.
 PAGE_MARK = "(() => location.href + ' | ' + [...document.querySelectorAll('h1, h2, h3')].map(node => node.innerText.trim()).join(' / '))()"
-NO_PANEL = "There is no Simplify panel on this page: do it yourself, by the general rules."
+NO_PANEL = ("Simplify offers nothing to press on this page: do it yourself, by the general rules. On each next page or step of "
+            "the form, call simplify_fill again: it may work there.")
+# A job's own page, before its form (Workable's, 2026-11-13): the panel offers only "Start Application" there, and fills on
+# the form behind the page's Apply button.
+JOB_PAGE = ("This is the job's page, not its application form: Simplify offers only to start the application here. Open the "
+            "form with the page's own Apply button, then call simplify_fill on the form.")
 # What the model is told when Simplify's button could not be pressed on a page: some sites keep it from working while a
 # cookie banner or another pop-up is up.
 COVERED = ("If a cookie banner, a consent dialog or another pop-up is over the page, close it first (reject the cookies that are not needed, where offered) and call simplify_fill once more; otherwise, or if it fails again, do this page yourself.")
@@ -782,7 +787,7 @@ presses it for you. These rules come before the general ones on accounts and on 
 - On every new page or step of the form, call simplify_fill first, before you fill anything yourself; then read the page and \
 do only what it left.
 - A create-account or sign-in page: call simplify_fill. Simplify makes the account or signs in, with a password it keeps, and \
-opens the application. Only when it says there is no panel, or the page did not move on, do it yourself: sign in with the \
+opens the application. Only when it says it offers nothing there, or the page did not move on, do it yourself: sign in with the \
 account_password from the answers, or create the account with it.
 - The resume: Simplify attaches it. Never upload the CV file where a resume is already attached; upload it yourself only \
 when the resume field still shows no file after simplify_fill.
@@ -831,7 +836,7 @@ async def _read(session: Browser, expression: str) -> Any:
 def _ready(buttons: dict[str, str]) -> bool:
     """Whether the panel has finished loading a button this can act on. It shows itself empty first, then its "Autofill This
     Page" greyed while it reads the page, then ready: on Upstart's own careers site (2026-11-13) at 2, 4 and 6 seconds."""
-    if "account-fill-button" in buttons or "account-submit-button" in buttons:
+    if {"account-fill-button", "account-submit-button", "start-application-button"} & buttons.keys():
         return True
     label = buttons.get("fill-button")
     return isinstance(label, str) and ("complete" in label.lower() or not label.endswith(DISABLED))
@@ -934,6 +939,8 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
             # Greyed all the while it was waited for: still loading, or not for this page. It filled nothing.
             return f"Simplify's button stayed greyed on this page and filled nothing. {COVERED}", False
         return await _simplify_fill(session), False
+    if "start-application-button" in buttons:
+        return JOB_PAGE, False
     return NO_PANEL, False
 
 

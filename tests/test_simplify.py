@@ -16,6 +16,7 @@ from aihawk import apply as apply_module
 from aihawk.apply import (
     COVERED,
     FILLED,
+    JOB_PAGE,
     NO_PANEL,
     PAGE_MARK,
     PASSWORDS_FILLED,
@@ -321,3 +322,17 @@ def test_once_the_model_closed_a_banner_its_second_simplify_fill_presses_the_but
 
 def test_a_panel_with_none_of_its_buttons_is_no_panel_once_waited_for() -> None:
     assert act(Panel([[{}]])) == (NO_PANEL, False)
+    assert "call simplify_fill again" in NO_PANEL
+
+
+def test_a_job_page_where_the_panel_only_starts_the_application_sends_the_model_to_the_form(tmp_path: Path) -> None:
+    # As on Workable: the job's page, where the panel offers only "Start Application", told so at once and not pressed. The
+    # model opens the form with the page's Apply button and calls simplify_fill there, which fills it.
+    start = {"start-application-button": "Start Application"}
+    browser = Panel([[start], [FILL], [FILLING, FILLED_ONCE]])
+    assert act(Panel([[{}, start]])) == (JOB_PAGE, False)
+    model = ScriptedModel([tool_call("browser_click", selector=NEXT_PAGE)], [tool_call("simplify_fill")], ready(), VERIFIED)
+    outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png", simplify=True))  # type: ignore[arg-type]
+    assert outcome.status == "submitted"
+    assert browser.clicks() == [NEXT_PAGE, SIMPLIFY_BUTTON, "#send"]
+    assert JOB_PAGE in model.requests[0]["messages"][1]["content"]
