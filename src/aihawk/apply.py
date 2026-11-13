@@ -716,6 +716,9 @@ class _Traced:
         self.started = time.monotonic()
 
     def _hide(self, text: str) -> str:
+        for found in PASSWORD_SEEN.finditer(text):
+            if (value := found.group("before") or found.group("after")) and value not in self.secrets:
+                self.secrets += (value,)
         for secret in self.secrets:
             text = text.replace(secret, "(hidden)")
         return text
@@ -730,6 +733,12 @@ class _Traced:
         text = " ".join(tool_text(result).split())[:300]
         self.note(f"<- {'ERROR ' if result.isError else ''}{text}")
         return result
+
+
+# A password field's value in what a page reading gave: {"type": "password", ..., "value": "..."} or the other way round.
+PASSWORD_SEEN = re.compile(
+    r'"type":\s*"password"[^{}]*?"value":\s*"(?P<before>[^"]+)"|"value":\s*"(?P<after>[^"]+)"[^{}]*?"type":\s*"password"'
+)
 
 
 def _secrets_in(answers: str) -> tuple[str, ...]:
@@ -822,15 +831,13 @@ FILLED = (
 # group with it), and a step of the model's that would change a marked field is refused.
 KEPT = "data-aihawk-simplify"
 _FIELD_STATE = (
-    "const fields = root => [...root.querySelectorAll('input:not([type=hidden]), textarea, select')];"
-    " const state = field => field.type === 'checkbox' || field.type === 'radio' ? (field.checked ? '1' : '')"
+    "const fields = root => [...root.querySelectorAll('input:not([type=hidden]), textarea, select, button[aria-haspopup=listbox]')];"
+    " const state = field => field.tagName === 'BUTTON' ? ((field.innerText || '').trim().match(/^(select one|select|choose)/i) ? '' : (field.innerText || '').trim())"
+    " : field.type === 'checkbox' || field.type === 'radio' ? (field.checked ? '1' : '')"
     " : field.type === 'file' ? String(field.files.length) : field.multiple ? [...field.selectedOptions].map(o => o.value).join('|')"
     " : (field.value || '').trim();"
 )
 BEFORE_SIMPLIFY = f"(() => {{ {_FIELD_STATE} for (const field of fields(document)) field.setAttribute('data-aihawk-was', state(field)); return true; }})()"
-# Whether this page's fields were noted before an earlier press: a page whose button says "Run Autofill Again" without it
-# was filled by the add-on itself as it opened, and all it holds is Simplify's.
-NOTED = "document.querySelector('[data-aihawk-was]') !== null"
 MARK_SIMPLIFY = (
     f"(() => {{ {_FIELD_STATE} let marked = 0; const mark = field => {{ if (!field.hasAttribute('{KEPT}')) {{ field.setAttribute('{KEPT}', '1'); marked++; }} }};"
     " for (const field of fields(document)) { const now = state(field); if (!now || now === '0') continue;"
@@ -844,11 +851,13 @@ _KEPT_FIELD = (
     "((selector, x, y, focused) => { let node = null;"
     " try { node = focused ? document.activeElement : x !== null ? document.elementFromPoint(x, y) : document.querySelector(selector); }"
     " catch (error) { return null; }"
-    " if (!node || node.closest('button, a[href], [type=submit], [type=button]')) return null;"
+    " if (!node) return null; const list = node.closest('button[aria-haspopup=listbox]'); if (list) node = list;"
+    " else if (node.closest('button, a[href], [type=submit], [type=button]')) return null;"
     f" const kept = field => !!field && field.hasAttribute('{KEPT}');"
-    " const name = field => { const label = (field.labels && field.labels[0]) || field.closest('fieldset');"
+    " const name = field => { const label = (field.labels && field.labels[0]) || field.closest('fieldset')"
+    " || (field.getAttribute('aria-labelledby') && document.getElementById(field.getAttribute('aria-labelledby').split(' ')[0]));"
     " return ((label && label.innerText) || field.getAttribute('aria-label') || field.name || field.id || 'a field').trim().replace(/\\s+/g, ' ').slice(0, 80); };"
-    " const own = node.matches('input, textarea, select') ? node : node.control || null;"
+    " const own = node.matches('input, textarea, select, button[aria-haspopup=listbox]') ? node : node.control || null;"
     " if (own) return kept(own) ? name(own) : null;"
     " for (let up = node, level = 0; up && level < 3; up = up.parentElement, level++) {"
     " const inside = [...up.querySelectorAll('input:not([type=hidden]), textarea, select')]; if (!inside.length) continue;"
@@ -952,20 +961,22 @@ async def _moved(session: Browser, before: Any) -> bool:
     return False
 
 
-async def _simplify_fill(session: Browser, label: str) -> str:
-    """The add-on's "Autofill This Page" (its `label` now) pressed and waited for; what it did, in a line."""
-    before = await _read(session, FILLED)
-    # "Run Autofill Again" on a page this never pressed on: the add-on has been here before (Upstart, on a second visit), and
-    # what the page holds after this press is all Simplify's. Otherwise only what changes with this press is.
-    if not ("again" in label.lower() and await _read(session, NOTED) is not True):
-        await _read(session, BEFORE_SIMPLIFY)
-    clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
+async def _simplify_press(session: Browser, selector: str) -> Any:
+    """One of the add-on's buttons pressed. Its report of an earlier fill ("Autofill complete! 8 required fields need
+    review"), unfolded, can lie over the buttons (Upstart on a second visit, Workday's sign-in page): folded, they can be."""
+    clicked = await session.call_tool("browser_click", {"selector": selector})
     if clicked.isError:
-        # On a page it filled before, the add-on's report of that fill ("Autofill complete! 8 required fields need review")
-        # lies unfolded over the button: folded, the button can be pressed.
         with suppress(Exception):
-            await session.call_tool("browser_click", {"selector": SIMPLIFY_REPORT})
-            clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
+            if not (await session.call_tool("browser_click", {"selector": SIMPLIFY_REPORT})).isError:
+                clicked = await session.call_tool("browser_click", {"selector": selector})
+    return clicked
+
+
+async def _simplify_fill(session: Browser) -> str:
+    """The add-on's "Autofill This Page" pressed and waited for; what it did, in a line."""
+    before = await _read(session, FILLED)
+    await _read(session, BEFORE_SIMPLIFY)
+    clicked = await _simplify_press(session, SIMPLIFY_BUTTON)
     if clicked.isError:
         return f"Simplify's button did not take the click: {tool_text(clicked)[:200]}. {COVERED}"
     await _simplify_filling(session, pressed=True)
@@ -988,7 +999,7 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
         # The upper button first, always: it fills the form, and the lower one ("Create Account", "Sign In") only sends what is
         # there. Some sites show both from the start, and a press of the lower one alone, on an empty form, does nothing.
         if isinstance(account, str):
-            clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_ACCOUNT})
+            clicked = await _simplify_press(session, SIMPLIFY_ACCOUNT)
             if clicked.isError:
                 return f"Simplify's account button did not take the click: {tool_text(clicked)[:200]}. Do the account yourself.", False
         # Then the lower one, once it is there and can be pressed and the form holds the password.
@@ -1012,16 +1023,18 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
                 "Read the page and do only what it left."), not signing
     if "fill-button" in buttons:
         label = buttons["fill-button"]
-        if "complete" in label.lower():
-            # The add-on filled the page by itself as it opened (seen on JazzHR: "Autofill complete!", a button that takes no
-            # click): nothing to press, and what it filled is there.
+        # The add-on filled the page by itself as it opened (seen on JazzHR: "Autofill complete!", a button that takes no
+        # click; on Workday's "My Information" after signing in: "Run Autofill Again"), or it was pressed here before: nothing
+        # to press, and what it filled is there. Pressed again it fills the page a second time, over what was done since. Only
+        # a page that holds nothing at all is filled again (a page it filled on an earlier visit, opened afresh).
+        if "complete" in label.lower() or ("again" in label.lower() and (await _read(session, FILLED) or 0) > 0):
             await _read(session, MARK_SIMPLIFY)
             return ("Simplify already filled this page by itself as it opened, and attached the resume where the page asks for one. "
                     "Read the page and do only what it left."), False
         if label.endswith(DISABLED):
             # Greyed all the while it was waited for: still loading, or not for this page. It filled nothing.
             return f"Simplify's button stayed greyed on this page and filled nothing. {COVERED}", False
-        return await _simplify_fill(session, label), False
+        return await _simplify_fill(session), False
     if "start-application-button" in buttons:
         return JOB_PAGE, False
     return NO_PANEL, False

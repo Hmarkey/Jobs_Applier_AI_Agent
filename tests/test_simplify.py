@@ -26,9 +26,11 @@ from aihawk.apply import (
     SIMPLIFY_BUTTON,
     SIMPLIFY_BUTTONS,
     SIMPLIFY_ID,
+    SIMPLIFY_REPORT,
     SIMPLIFY_RULES,
     SYSTEM,
     _account_line,
+    _Traced,
     kept_field_check,
     kept_refusal,
     run_on_page,
@@ -139,9 +141,18 @@ def test_a_filling_that_never_says_it_ended_is_waited_for_no_longer_than_its_tim
     assert "filled 3 fields" in act(Panel([[FILL], [FILLING]], [2, 5]))[0]
 
 
-def test_a_page_already_filled_is_filled_again_and_not_read_as_done_before_it_starts() -> None:
-    browser = Panel([[FILLED_ONCE], [FILLED_ONCE, FILLING, FILLED_ONCE]], [3, 6])
-    assert "filled 3 fields" in act(browser)[0]
+def test_a_page_simplify_already_filled_is_not_filled_a_second_time() -> None:
+    # Workday's "My Information" after signing in: the add-on filled it by itself, and its button says "Run Autofill Again".
+    browser = Panel([[FILLED_ONCE]], [7])
+    words, made = act(browser)
+    assert browser.clicks() == [] and not made
+    assert words.startswith("Simplify already filled this page")
+    assert any(name == "browser_evaluate" and arguments["expression"] == MARK_SIMPLIFY for name, arguments in browser.calls)
+
+
+def test_a_page_it_filled_on_an_earlier_visit_but_now_empty_is_filled_again_and_not_read_as_done_before_it_starts() -> None:
+    browser = Panel([[FILLED_ONCE], [FILLED_ONCE, FILLING, FILLED_ONCE]], [0, 0, 6])
+    assert "filled 6 fields" in act(browser)[0]
     assert browser.clicks() == [SIMPLIFY_BUTTON]
 
 
@@ -375,3 +386,30 @@ def test_which_steps_are_checked_for_a_field_simplify_filled() -> None:
     assert '"#a"' in (kept_field_check("browser_select_option", {"selector": "#a", "value": "x"}) or "")
     assert "(null, 10.0, 20.0, false)" in (kept_field_check("browser_click_at", {"x": 10, "y": 20}) or "")
     assert "Simplify" in SIMPLIFY_RULES and "Never change what Simplify filled" in SIMPLIFY_RULES
+
+
+def test_a_trace_hides_a_password_it_reads_off_the_page_from_then_on(tmp_path: Path) -> None:
+    trace = _Traced(Panel([[None]]), tmp_path / "trace.log", ())  # type: ignore[arg-type]
+    trace.note('<- [{"id": "input-18", "type": "text", "value": "a@b.c"}, {"id": "input-19", "type": "password", "value": "S3cret*$x"}]')
+    trace.note('-> browser_type {"selector": "#input-3", "text": "S3cret*$x"}')
+    written = (tmp_path / "trace.log").read_text(encoding="utf-8")
+    assert "S3cret" not in written and written.count("(hidden)") == 2 and "a@b.c" in written
+
+
+def test_an_account_button_its_report_lies_over_is_pressed_once_the_report_is_folded() -> None:
+    class Covered(Panel):
+        """The first press of the account button lands on the add-on's unfolded report."""
+
+        async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> SimpleNamespace:
+            if name == "browser_click" and (arguments or {}).get("selector") == SIMPLIFY_ACCOUNT and not self.folded:
+                self.calls.append((name, arguments or {}))
+                return SimpleNamespace(isError=True, content=[SimpleNamespace(text="the event would have landed elsewhere")])
+            if name == "browser_click" and (arguments or {}).get("selector") == SIMPLIFY_REPORT:
+                self.folded = True
+            return await super().call_tool(name, arguments)
+
+    browser = Covered([[ACCOUNT], [ACCOUNT, ACCOUNT_READY], [FILLING, FILLED_ONCE]])
+    browser.folded = False  # type: ignore[attr-defined]
+    words, made = act(browser)
+    assert browser.clicks() == [SIMPLIFY_ACCOUNT, SIMPLIFY_REPORT, SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND]
+    assert made and "created the candidate's account" in words
