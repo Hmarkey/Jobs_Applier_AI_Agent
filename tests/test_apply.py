@@ -1040,3 +1040,27 @@ def test_a_page_that_moved_on_is_never_taken_for_a_refusal_and_never_sent_again(
     browser.call_tool = moves  # type: ignore[method-assign]
     outcome = run(ScriptedModel(ready(), UNCHANGED), browser, tmp_path / "proof.png")
     assert outcome.status == "unconfirmed" and browser.clicks() == ["#send"]
+
+
+ASKS_CODE = json.dumps({"outcome": "unknown", "evidence": "A verification code was sent to a@b.c: enter the 8-character code", "asks_code": True})
+
+
+def test_a_code_the_page_asks_for_after_the_send_is_read_typed_and_sent(tmp_path: Path) -> None:
+    # Greenhouse's security code: the send is taken, the page asks for the code it emailed; the model reads it from the mailbox,
+    # types it, and the form is sent again and confirmed.
+    browser = ScriptedBrowser({"#send": SUBMIT})
+    model = ScriptedModel(ready(), ASKS_CODE, [tool_call("browser_type", selector="#security-input-0", text="AB12CD34")], ready(), VERIFIED)
+    outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png"))  # type: ignore[arg-type]
+    assert outcome.status == "submitted" and not outcome.code
+    assert browser.clicks() == ["#send", "#send"]
+    assert any("asks for a code it sent" in str(message.get("content", "")) for request in model.requests for message in request.get("messages", [])
+               if isinstance(message, dict))
+
+
+def test_a_code_that_never_comes_leaves_the_form_unconfirmed_and_never_blocked(tmp_path: Path) -> None:
+    browser = ScriptedBrowser({"#send": SUBMIT})
+    blocked = [tool_call("finish_form", status="blocked", blocked_by="no_code", summary="no code arrived", submit_selector="")]
+    model = ScriptedModel(ready(), ASKS_CODE, blocked)
+    outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png"))  # type: ignore[arg-type]
+    assert outcome.status == "unconfirmed" and browser.clicks() == ["#send"]
+    assert "no code arrived" in outcome.summary
