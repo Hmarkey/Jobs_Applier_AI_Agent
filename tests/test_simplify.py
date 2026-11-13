@@ -39,6 +39,8 @@ from fakes import ScriptedBrowser, ScriptedModel, tool_call
 from test_apply import JOB, SUBMIT, VERIFIED, ready
 
 ROOT = Path(__file__).resolve().parents[1]
+# A control of the page that moves it to its next page: the panel shows what that page offers.
+NEXT_PAGE = "#next-page"
 FILL = {"fill-button": "Autofill This Page"}
 FILLING = {"fill-button": "Autofilling"}
 FILLED_ONCE = {"fill-button": "Run Autofill Again"}
@@ -92,6 +94,8 @@ class Panel(ScriptedBrowser):
             if expression == FILLED:
                 return self._answer(self._next(self.filled))
             return self._answer(f"page {self.sent if self.moves else 0}")
+        if name == "browser_click" and arguments.get("selector") == NEXT_PAGE:
+            self.pressed += 1
         if name == "browser_click" and arguments.get("selector") in (SIMPLIFY_BUTTON, SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND):
             self.calls.append((name, arguments))
             if self.click_fails:
@@ -184,13 +188,13 @@ def test_a_lower_button_that_never_becomes_ready_is_not_pressed() -> None:
 
 
 def test_with_simplify_on_the_model_has_the_rules_and_the_tool_and_an_account_it_makes_is_kept(tmp_path: Path) -> None:
-    # The first page: a panel with none of the buttons this needs (Workday's start page). Then the model presses simplify_fill
-    # on the account page, where the add-on's "Create Account" is already offered.
-    browser = Panel([[{}, ACCOUNT_READY], [ACCOUNT_READY], [FILLING, FILLED_ONCE]])
-    model = ScriptedModel([tool_call("simplify_fill")], ready(), VERIFIED)
+    # The first page: a panel with none of the buttons this needs (Workday's start page). The model moves to the account page,
+    # where both of the add-on's account buttons are offered, and presses simplify_fill there.
+    browser = Panel([[{}], [ACCOUNT_READY], [ACCOUNT_READY], [FILLING, FILLED_ONCE]])
+    model = ScriptedModel([tool_call("browser_click", selector=NEXT_PAGE)], [tool_call("simplify_fill")], ready(), VERIFIED)
     outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png", simplify=True))  # type: ignore[arg-type]
     assert outcome.status == "submitted" and outcome.made_account
-    assert browser.clicks() == [SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND, "#send"]
+    assert browser.clicks() == [NEXT_PAGE, SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND, "#send"]
     request = model.requests[0]
     assert SIMPLIFY_RULES in request["messages"][1]["content"] and NO_PANEL in request["messages"][1]["content"]
     assert "simplify_fill" in [tool["function"]["name"] for tool in request["tools"]]
@@ -281,7 +285,26 @@ def test_the_runner_is_told_just_before_the_send_is_clicked_and_not_in_a_trial(t
 
 
 def test_a_page_the_add_on_already_filled_by_itself_is_not_pressed() -> None:
-    for label in ("Autofill complete!", "Autofill This Page [disabled]"):
-        browser = Panel([[{"fill-button": label}]])
-        words, made = act(browser)
-        assert browser.clicks() == [] and not made and "already filled this page by itself" in words
+    browser = Panel([[{"fill-button": "Autofill complete!"}]])
+    words, made = act(browser)
+    assert browser.clicks() == [] and not made and "already filled this page by itself" in words
+
+
+def test_a_panel_still_loading_is_waited_for_and_then_pressed() -> None:
+    # As on Upstart's careers site: nothing, then an empty panel, then its button greyed while it reads the page, then ready.
+    greyed = {"fill-button": "Autofill This Page [disabled]"}
+    browser = Panel([[None, {}, greyed, greyed, FILL], [FILLING, FILLED_ONCE]], [0, 12])
+    words, made = act(browser)
+    assert browser.clicks() == [SIMPLIFY_BUTTON] and not made
+    assert words.startswith("Simplify filled 12 fields")
+
+
+def test_a_button_that_stays_greyed_is_said_and_not_taken_for_a_filled_page() -> None:
+    browser = Panel([[{"fill-button": "Autofill This Page [disabled]"}]])
+    words, made = act(browser)
+    assert browser.clicks() == [] and not made
+    assert "stayed greyed" in words and "already filled" not in words
+
+
+def test_a_panel_with_none_of_its_buttons_is_no_panel_once_waited_for() -> None:
+    assert act(Panel([[{}]])) == (NO_PANEL, False)

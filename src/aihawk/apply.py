@@ -745,7 +745,7 @@ SIMPLIFY_ADDON_URL = "https://addons.mozilla.org/firefox/addon/simplify-jobs/"
 SIMPLIFY_BUTTON = "#fill-button"
 SIMPLIFY_ACCOUNT = "#account-fill-button"
 SIMPLIFY_ACCOUNT_SEND = "#account-submit-button"
-SIMPLIFY_PANEL_S = 12
+SIMPLIFY_PANEL_S = 15
 SIMPLIFY_FILL_S = 60
 SIMPLIFY_ACCOUNT_S = 20
 SIMPLIFY_PAGE_S = 30
@@ -825,13 +825,26 @@ async def _read(session: Browser, expression: str) -> Any:
         return None
 
 
+def _ready(buttons: dict[str, str]) -> bool:
+    """Whether the panel has finished loading a button this can act on. It shows itself empty first, then its "Autofill This
+    Page" greyed while it reads the page, then ready: on Upstart's own careers site (2026-11-13) at 2, 4 and 6 seconds."""
+    if "account-fill-button" in buttons or "account-submit-button" in buttons:
+        return True
+    label = buttons.get("fill-button")
+    return isinstance(label, str) and ("complete" in label.lower() or not label.endswith(DISABLED))
+
+
 async def _simplify_buttons(session: Browser, seconds: float) -> dict[str, str] | None:
-    """The panel's buttons and their words, once it is on the page, waited for up to `seconds`; None when there is no panel."""
+    """The panel's buttons and their words, once one is ready to act on, waited for up to `seconds`; what the panel showed
+    last when none got ready (a panel with none of these buttons, or one still greyed); None when there is no panel."""
+    latest = None
     for _ in range(max(1, int(seconds / SIMPLIFY_POLL_S))):
         if isinstance(buttons := await _read(session, SIMPLIFY_BUTTONS), dict):
-            return buttons
+            if _ready(buttons):
+                return buttons
+            latest = buttons
         await asyncio.sleep(SIMPLIFY_POLL_S)
-    return None
+    return latest
 
 
 async def _simplify_filling(session: Browser, pressed: bool) -> None:
@@ -909,11 +922,14 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
                 "Read the page and do only what it left."), not signing
     if "fill-button" in buttons:
         label = buttons["fill-button"]
-        if "complete" in label.lower() or label.endswith(DISABLED):
+        if "complete" in label.lower():
             # The add-on filled the page by itself as it opened (seen on JazzHR: "Autofill complete!", a button that takes no
             # click): nothing to press, and what it filled is there.
             return ("Simplify already filled this page by itself as it opened, and attached the resume where the page asks for one. "
                     "Read the page and do only what it left."), False
+        if label.endswith(DISABLED):
+            # Greyed all the while it was waited for: still loading, or not for this page. It filled nothing.
+            return "Simplify's button stayed greyed on this page and filled nothing: do this page yourself.", False
         return await _simplify_fill(session), False
     return NO_PANEL, False
 
