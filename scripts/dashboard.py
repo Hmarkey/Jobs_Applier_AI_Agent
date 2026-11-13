@@ -3,8 +3,9 @@
 The page has two views. The applications: every job AIHawk tried, read from AIHawk's store, data/jobs.db, which the page
 itself never writes to. What you track yourself (how each application is going, the next step and its date, your notes)
 is kept in a file of its own beside it, data/tracking.db. The jobs found: the ones the search found and AIHawk has not
-tried, best first, each with its posting, to select and send. Sending goes through AIHawk's own Session, as AIHawk's screen
-does, and it is AIHawk's code that records how each one went. The server answers on 127.0.0.1 only.
+tried, best first, each with its posting, to send automatically or to apply to yourself. Sending goes through AIHawk's own
+Session, as AIHawk's screen does, and it is AIHawk's code that records how each one went; a job you applied to yourself is
+marked as sent through AIHawk's own Store, so that AIHawk never sends it again. The server answers on 127.0.0.1 only.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from aihawk.library import Library
 from aihawk.llm import ACCOUNT_CAUSES, refused
 from aihawk.screens import readable
 from aihawk.session import Session
-from aihawk.store import SENT_WORDS, SUBMITTED
+from aihawk.store import SENT_WORDS, SUBMITTED, Proof, Store, write_applied
 from aihawk.telemetry import vendor_of
 
 PAGE = Path(__file__).with_name("dashboard.html")
@@ -195,7 +196,8 @@ class Data:
             "site": host if vendor == "other" else vendor,
             "when": row["sent_at"] or row["updated"],
             "result": row["status"],
-            "result_words": RESULTS.get(row["status"], row["status"]),
+            "result_words": "手动申请" if reason == MANUAL else RESULTS.get(row["status"], row["status"]),
+            "manual": reason == MANUAL,
             "reason": reason,
             "reason_words": reason_words(reason),
             "evidence": row["verdict_evidence"] or "",
@@ -316,6 +318,46 @@ class Data:
             raise LookupError(f"{len(missing)} 个职位已经申请过或不在列表里了，请刷新后重新选择")
         return [{"id": job_id, "company": rows[job_id]["company"], "title": rows[job_id]["title"]} for job_id in job_ids]
 
+    # The applications you make yourself.
+
+    def mark_manual(self, job_id: str) -> dict[str, Any]:
+        """A job found, applied to by you in your own browser: kept in AIHawk's store as sent, so that it is listed and tracked
+        with the others and AIHawk never sends it again. Written through AIHawk's own Store, as an application would be."""
+        self.untried([job_id])
+        store = Store(self.jobs)
+        try:
+            store.set_status(job_id, "submitted", MANUAL_NOTE, MANUAL)
+            store.set_proof(job_id, Proof(at=_now(), verdict=MANUAL, evidence="你自己在浏览器里完成了申请"))
+            self._applied_csv(store)
+        finally:
+            store.close()
+        return next(item for item in self.items() if item["id"] == job_id)
+
+    def undo_manual(self, job_id: str) -> None:
+        """A job marked as applied by you by mistake, back among the jobs found as it was: scored if it had a score. Your
+        tracking of it goes too. Only a job marked by hand can be put back: one AIHawk sent stays sent."""
+        with self._store() as db:
+            row = db.execute("SELECT status, reason, score FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None or row["reason"] != MANUAL or row["status"] not in SUBMITTED:
+            raise LookupError(job_id)
+        store = Store(self.jobs)
+        try:
+            store.set_status(job_id, "scored" if row["score"] is not None else "new")
+            store.set_proof(job_id, Proof())
+            self._applied_csv(store)
+        finally:
+            store.close()
+        with self._tracking() as db:
+            db.execute("DELETE FROM tracking WHERE job_id = ?", (job_id,))
+            db.commit()
+
+    def _applied_csv(self, store: Store) -> None:
+        """applied.csv, which AIHawk writes after each application, written again so that it lists what you did yourself too."""
+        try:
+            write_applied(self.data_dir.parent / "applied.csv", store.sent())
+        except OSError:
+            pass  # Another program holds it open: AIHawk writes it again after its next application.
+
 
 class Busy(Exception):
     """A batch is being sent already."""
@@ -330,6 +372,9 @@ def _idle() -> dict[str, Any]:
 # have been ended after the click that sends.
 STOPPED = "stopped"
 STOPPED_NOTE = "你在申请过程中终止了它。如果终止时已经点了提交按钮，申请可能已经发出：请打开职位链接确认。"
+# A job you applied to yourself, in your own browser, and marked here as done.
+MANUAL = "manual"
+MANUAL_NOTE = "你在自己的浏览器里手动完成了这份申请，然后在看板里标记为已完成。"
 
 
 class Sender:
@@ -546,7 +591,7 @@ def handler(data: Data, port: int, sender: Sender) -> type[BaseHTTPRequestHandle
             if not self._allowed() or self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
                 return self._send(HTTPStatus.FORBIDDEN, b"", "text/plain")
             path = urlsplit(self.path).path
-            if path not in ("/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate"):
+            if path not in ("/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate", "/api/manual", "/api/manual/undo"):
                 return self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
             try:
                 change = json.loads(raw or b"{}")
@@ -558,11 +603,19 @@ def handler(data: Data, port: int, sender: Sender) -> type[BaseHTTPRequestHandle
                     return self._json(sender.stop())
                 if path == "/api/apply/terminate":
                     return self._json(sender.terminate())
+                if path == "/api/manual":
+                    if sender.state()["running"] and self._job_id() in {job["id"] for job in sender.state()["queue"]}:
+                        return self._json({"error": "这个职位在正在发送的这批里，等这批结束后再标记"}, HTTPStatus.CONFLICT)
+                    return self._json(data.mark_manual(self._job_id()))
+                if path == "/api/manual/undo":
+                    data.undo_manual(self._job_id())
+                    return self._json({"ok": True})
                 self._json(data.save(self._job_id(), change))
             except Busy:
                 self._json({"error": "已经有一批申请在发送中"}, HTTPStatus.CONFLICT)
             except LookupError as error:
-                self._json({"error": str(error) if path == "/api/apply" else "not found"}, HTTPStatus.NOT_FOUND)
+                words = {"/api/apply": str(error), "/api/manual": "这个职位已经申请过或不在列表里了，请刷新", "/api/manual/undo": "只有手动标记的申请可以撤销"}
+                self._json({"error": words.get(path, "not found")}, HTTPStatus.NOT_FOUND)
             except ValueError as error:
                 self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             except sqlite3.Error as error:

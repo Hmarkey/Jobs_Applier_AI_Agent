@@ -190,6 +190,58 @@ def test_terminate_when_nothing_is_sent_changes_nothing(home: Path) -> None:
     assert not state["running"] and not state["terminating"]
 
 
+def test_a_job_applied_to_by_hand_is_listed_and_tracked_as_sent(home: Path) -> None:
+    data = dashboard.Data(home)
+    item = data.mark_manual(job("low").id)
+    assert item["result"] == "submitted" and item["manual"] and item["result_words"] == "手动申请"
+    assert item["stage"] == "waiting" and item["group"] == "waiting" and item["when"]
+    assert job("low").id not in {found["id"] for found in data.found()}
+    assert "手动完成" in data.details(job("low").id)["filled"]
+    # AIHawk sees it as sent: it never sends it again, and applied.csv lists it.
+    store = Store(home / "data" / "jobs.db")
+    assert store.get(job("low").id).status == "submitted"
+    store.close()
+    assert "low Inc" in (home / "applied.csv").read_text(encoding="utf-8-sig")
+    # It is tracked as any other: a stage, a date, notes.
+    assert data.save(job("low").id, {"stage": "interviewing", "notes": "phone screen"})["group"] == "active"
+
+
+def test_a_job_already_tried_cannot_be_marked_by_hand(home: Path) -> None:
+    with pytest.raises(LookupError):
+        dashboard.Data(home).mark_manual(job("sent").id)
+
+
+def test_a_mark_by_hand_can_be_undone_and_the_job_is_found_again_as_it_was(home: Path) -> None:
+    data = dashboard.Data(home)
+    data.mark_manual(job("high").id)
+    data.save(job("high").id, {"notes": "a mistake"})
+    data.undo_manual(job("high").id)
+    found = next(item for item in data.found() if item["id"] == job("high").id)
+    assert found["status"] == "scored" and found["score"] == 4.0
+    assert job("high").id not in {item["id"] for item in data.items()}
+    # Tracked again from nothing, if it is marked again.
+    assert data.mark_manual(job("high").id)["notes"] == ""
+    data.mark_manual(job("unscored").id)
+    data.undo_manual(job("unscored").id)
+    assert next(item for item in data.found() if item["id"] == job("unscored").id)["status"] == "new"
+
+
+def test_only_a_mark_by_hand_can_be_undone(home: Path) -> None:
+    with pytest.raises(LookupError):
+        dashboard.Data(home).undo_manual(job("sent").id)
+
+
+def test_the_page_marks_and_unmarks_a_job_by_hand(server: Any) -> None:
+    status, body = call(f"{server.base}/api/manual?id={job('other').id}", {})
+    assert status == 200 and body["manual"]
+    status, body = call(f"{server.base}/api/manual?id={job('other').id}", {})
+    assert status == 404 and "申请过" in body["error"]
+    status, _ = call(f"{server.base}/api/manual/undo?id={job('other').id}", {})
+    assert status == 200
+    status, body = call(f"{server.base}/api/manual/undo?id={job('sent').id}", {})
+    assert status == 404 and "手动" in body["error"]
+
+
 def test_a_failure_of_the_whole_batch_is_said_in_a_line(home: Path) -> None:
     def broken(path: Path) -> Any:
         raise RuntimeError("the settings cannot be read")

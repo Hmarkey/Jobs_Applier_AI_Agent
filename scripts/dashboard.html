@@ -209,6 +209,15 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .btn.danger { border-color: var(--critical); color: var(--critical); }
 .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--critical) 10%, transparent); }
 .head-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; flex: none; }
+.notice.good { border-left-color: var(--series-3); }
+.linkish { background: none; border: 0; padding: 0; color: var(--accent); text-align: left; }
+.linkish:hover { text-decoration: underline; }
+.card.manual { margin-bottom: 12px; }
+.manual-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.manual-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); }
+.manual-list li:first-child { border-top: 0; }
+.manual-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.manual-actions a { color: var(--accent); text-decoration: none; font-size: 13px; }
 .progress { margin-bottom: 16px; }
 .progress .now { font-weight: 600; }
 .progress .note { color: var(--text-2); font-size: 13px; margin-top: 2px; }
@@ -714,6 +723,8 @@ async function openDrawer(id) {
       el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
     links.length ? el("div", { class: "links" }, ...links) : null,
     el("dl", { class: "facts" }, ...facts.flatMap(([name, value]) => [el("dt", { text: name }), el("dd", { text: value })])),
+    item.manual ? el("div", { class: "links" },
+      el("button", { class: "btn", type: "button", text: "撤销手动申请", title: "标记错了：把它放回「找到的职位」", onclick: e => undoManual(item, e.currentTarget) })) : null,
     el("h3", { text: "跟进" }),
     el("div", { class: "form" },
       el("label", {}, "状态", stageSelect),
@@ -787,6 +798,10 @@ async function loadFound() {
     jobs.meta = body;
     const here = new Set(body.items.map(item => item.id));
     for (const id of [...jobs.selected]) if (!here.has(id)) jobs.selected.delete(id);
+    // A job opened to apply yourself that is no longer found (applied, or gone from the search) waits for nothing.
+    const before = jobs.pending.size;
+    for (const id of [...jobs.pending]) if (!here.has(id)) jobs.pending.delete(id);
+    if (jobs.pending.size !== before) savePending();
     jobs.loaded = true;
     jobs.loadedAt = new Date();
     jobs.loadError = "";
@@ -859,7 +874,7 @@ function renderJobs() {
         el("td", { text: item.title }),
         el("td", { class: "muted", text: item.location || "—" }),
         el("td", { class: "muted", text: item.site }),
-        el("td", { class: "muted", text: item.status_words }));
+        el("td", { class: "muted" }, item.status_words, jobs.pending.has(item.id) ? el("span", { class: "tag", text: "手动申请中" }) : null));
     }));
   }
   const more = document.getElementById("job-more");
@@ -882,8 +897,28 @@ function toggle(id, on) {
 
 function renderNotices() {
   const notes = [];
+  if (jobs.flash) {
+    notes.push(el("div", { class: "notice good" }, jobs.flash, " ",
+      el("button", { class: "linkish", type: "button", text: "去申请记录查看", onclick: () => { jobs.flash = ""; showView("apps"); renderNotices(); } })));
+  }
   if (jobs.meta.blocked) notes.push(el("div", { class: "notice bad", text: jobs.meta.blocked }));
   if (jobs.meta.dry_run) notes.push(el("div", { class: "notice", text: "试运行模式（AIHAWK_DRY_RUN 已设置）：会打开浏览器并填写表单，但不会真正提交。" }));
+  const byId = Object.fromEntries(jobs.items.map(item => [item.id, item]));
+  const pending = [...jobs.pending].map(id => byId[id]).filter(Boolean);
+  if (pending.length) {
+    notes.push(el("div", { class: "card manual" },
+      el("div", { class: "card-head" }, el("h2", { text: `手动申请中（${pending.length}）` }),
+        el("p", { class: "hint", text: "这些职位的链接你已经打开。在浏览器里完成申请后点「我已完成申请」，它会记入申请记录。" })),
+      el("ul", { class: "manual-list" }, ...pending.map(item => {
+        const href = safeHref(item.url);
+        return el("li", {},
+          el("button", { class: "linkish co", type: "button", text: `${item.company} · ${item.title}`, onclick: () => openJobDrawer(item.id) }),
+          el("span", { class: "manual-actions" },
+            href ? el("a", { href, target: "_blank", rel: "noopener noreferrer", text: "打开链接 ↗" }) : null,
+            el("button", { class: "btn primary", type: "button", text: "我已完成申请", onclick: e => markManualDone(item, e.currentTarget) }),
+            el("button", { class: "btn", type: "button", text: "不申请了", onclick: () => dropPending(item.id) })));
+      }))));
+  }
   document.getElementById("job-notices").replaceChildren(...notes);
 }
 
@@ -908,10 +943,21 @@ async function openJobDrawer(id, keepScroll = false) {
   hideTip();
   const href = safeHref(item.url);
   const chosen = jobs.selected.has(id);
-  const pick = el("button", { class: chosen ? "btn" : "btn primary", type: "button", disabled: sending(),
-    text: chosen ? "取消选中" : "选中这个职位", onclick: () => toggle(id, !jobs.selected.has(id)) });
+  const pending = jobs.pending.has(id);
+  const inBatch = sending() && (jobs.send.queue || []).some(job => job.id === id);
+  const pick = el("button", { class: "btn", type: "button", disabled: sending(),
+    text: chosen ? "取消选中" : "加入选择", onclick: () => toggle(id, !jobs.selected.has(id)) });
+  const auto = el("button", { class: "btn primary", type: "button", disabled: sending() || Boolean(jobs.meta.blocked),
+    title: jobs.meta.blocked || (sending() ? "正在发送另一批申请" : "AIHawk 打开浏览器替你填写并提交"), text: "自动申请…", onclick: () => openConfirm([item]) });
+  const manual = href ? el("button", { class: "btn", type: "button", disabled: inBatch, title: "在你的默认浏览器里打开职位链接，自己完成申请",
+    text: pending ? "再次打开链接 ↗" : "手动申请 ↗", onclick: () => openManual(item) }) : null;
+  const manualBox = pending ? el("div", { class: "notice" },
+    el("div", { text: "你已经打开了这个职位的链接。在浏览器里完成申请后，回来点「我已完成申请」，它会记入申请记录，AIHawk 也不会再自动申请它。" }),
+    el("div", { class: "links" },
+      el("button", { class: "btn primary", type: "button", disabled: inBatch, text: "我已完成申请", onclick: e => markManualDone(item, e.currentTarget) }),
+      el("button", { class: "btn", type: "button", text: "不申请了", onclick: () => dropPending(id) }))) : null;
   const description = el("div", { class: "text-block", text: "读取中…" });
-  drawer.replaceChildren(
+  fill(drawer,
     el("div", { class: "drawer-head" },
       el("div", {}, el("h2", { id: "d-title", text: item.title }), el("div", { class: "muted", text: [item.company, item.location].filter(Boolean).join(" · ") })),
       el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
@@ -922,7 +968,8 @@ async function openJobDrawer(id, keepScroll = false) {
       ["网站", item.site || "—"],
       ["地点", item.location || "—"],
     ].flatMap(([name, value]) => [el("dt", { text: name }), el("dd", { text: value })])),
-    el("div", { class: "links" }, pick),
+    el("div", { class: "links" }, auto, manual, pick),
+    manualBox,
     el("h3", { text: "职位描述" }),
     description,
   );
@@ -948,8 +995,66 @@ function chosenJobs() {
     .sort((a, b) => (typeof b.score === "number" ? b.score : -1) - (typeof a.score === "number" ? a.score : -1));
 }
 
-function openConfirm() {
-  const list = chosenJobs();
+// ---------- applying yourself ----------
+// The jobs whose link you opened to apply yourself, until you say you did or did not: kept in this browser only.
+const MANUAL_KEY = "aihawk.manualPending";
+function readPending() {
+  try { return new Set(JSON.parse(localStorage.getItem(MANUAL_KEY) || "[]")); } catch { return new Set(); }
+}
+function savePending() {
+  try { localStorage.setItem(MANUAL_KEY, JSON.stringify([...jobs.pending])); } catch { /* kept for this visit only */ }
+}
+jobs.pending = readPending();
+
+function openManual(item) {
+  const href = safeHref(item.url);
+  if (!href) return;
+  window.open(href, "_blank", "noopener,noreferrer");
+  jobs.pending.add(item.id);
+  savePending();
+  renderJobs();
+  if (state.openJobId === item.id) openJobDrawer(item.id, true);
+}
+function dropPending(id) {
+  jobs.pending.delete(id);
+  savePending();
+  renderJobs();
+  if (state.openJobId === id) openJobDrawer(id, true);
+}
+async function markManualDone(item, button) {
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(`/api/manual?id=${encodeURIComponent(item.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    jobs.pending.delete(item.id);
+    jobs.selected.delete(item.id);
+    savePending();
+    jobs.flash = `已记入申请记录：${item.company} · ${item.title}`;
+    if (state.openJobId === item.id) closeDrawer();
+    await Promise.all([load(), loadFound()]);
+  } catch (error) {
+    if (button) button.disabled = false;
+    alert(`没有记录：${error.message}`);
+  }
+}
+async function undoManual(item, button) {
+  if (!confirm(`把「${item.company} · ${item.title}」放回找到的职位？\n\n这只会撤销看板里的记录，你在网站上提交的申请不会因此撤回。这条记录的跟进状态和备注也会删除。`)) return;
+  button.disabled = true;
+  try {
+    const response = await fetch(`/api/manual/undo?id=${encodeURIComponent(item.id)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    closeDrawer();
+    await Promise.all([load(), loadFound()]);
+  } catch (error) {
+    button.disabled = false;
+    alert(`没有撤销：${error.message}`);
+  }
+}
+
+function openConfirm(only) {
+  const list = Array.isArray(only) ? only : chosenJobs();
   if (!list.length || sending()) return;
   const go = el("button", { class: "btn primary", type: "button", text: `确认发送 ${list.length} 份申请` });
   const status = el("span", { class: "err", "aria-live": "polite" });
@@ -961,8 +1066,10 @@ function openConfirm() {
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || response.status);
       jobs.send = body;
-      jobs.selected.clear();
+      for (const item of list) { jobs.selected.delete(item.id); jobs.pending.delete(item.id); }
+      savePending();
       closeConfirm();
+      if (!drawer.hidden) closeDrawer();
       renderJobs();
       pollSend();
     } catch (error) {
