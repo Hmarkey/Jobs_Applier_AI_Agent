@@ -415,3 +415,118 @@ def test_a_standing_file_that_does_not_read_is_said_in_the_settings(page: Any) -
 def test_the_page_keeps_the_shared_key(page: Any) -> None:
     status, body = call(f"{page.base}/api/key", {"key": "sk-orca-new"})
     assert status == 200 and body["key_set"] and os.environ[KEY_ENV] == "sk-orca-new"
+
+
+# ---------- from another computer ----------
+
+PUBLIC = "demo.ngrok-free.app"
+
+
+def outside(url: str, body: Any = None, cookie: str = "", **headers: str) -> tuple[int, Any, str]:
+    """A request as the tunnel forwards it: the public address, and the visitor's sign-in cookie if any."""
+    sent = {"Host": PUBLIC, "X-Forwarded-For": "203.0.113.7", "Content-Type": "application/json", **headers}
+    if body is not None:
+        sent.setdefault("Origin", f"https://{PUBLIC}")
+    if cookie:
+        sent["Cookie"] = f"{dashboard.REMOTE_COOKIE}={cookie}"
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(url, data=data, headers=sent, method="POST" if data else "GET")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            text, kept = response.read(), response.headers.get("Set-Cookie", "")
+            status = response.status
+    except urllib.error.HTTPError as error:
+        text, kept, status = error.read(), error.headers.get("Set-Cookie", ""), error.code
+    try:
+        answer = json.loads(text) if text else None
+    except ValueError:
+        answer = text.decode()
+    return status, answer, dashboard._cookie(kept, dashboard.REMOTE_COOKIE)
+
+
+def signed_in(page: Any, user: str = "me") -> str:
+    page.hub.remote.set_host(PUBLIC)
+    password = call(f"{page.base}/api/remote?user={user}", {"on": True})[1]["password"]
+    status, _, cookie = outside(f"{page.base}/api/login", {"password": password})
+    assert status == 200 and cookie
+    return cookie
+
+
+def test_nothing_is_open_from_outside_without_a_public_address_and_a_sign_in(page: Any) -> None:
+    # No public address set: the tunnel's requests get nothing, even the sign-in page.
+    assert outside(f"{page.base}/")[0] == 403
+    page.hub.remote.set_host(f"https://{PUBLIC}/")
+    assert page.hub.remote.host == PUBLIC
+    status, text, _ = outside(f"{page.base}/")
+    assert status == 200 and "密码" in text and "投递看板" in text
+    for path in ("/api/users", "/api/data?user=me", "/api/found?user=me", "/api/profile?user=me"):
+        assert outside(f"{page.base}{path}")[0] == 401, path
+    assert outside(f"{page.base}/api/answers?user=me", {"name": "salary", "value": "1"})[0] == 401
+    # This computer's own address, but forwarded by the tunnel, is still from outside.
+    assert outside(f"{page.base}/api/users", Host=page.base.removeprefix("http://"))[0] == 403
+
+
+def test_a_password_made_here_signs_in_one_person_who_sees_only_their_own(page: Any) -> None:
+    call(f"{page.base}/api/users", {"name": "小王"})
+    cookie = signed_in(page)
+    status, body, _ = outside(f"{page.base}/api/users", cookie=cookie)
+    assert status == 200 and body["remote"] and [person["id"] for person in body["users"]] == ["me"]
+    # Whatever person the address names, it is the one signed in.
+    assert len(outside(f"{page.base}/api/found?user=user", cookie=cookie)[1]["items"]) == 2
+    assert "remote_access" not in outside(f"{page.base}/api/profile", cookie=cookie)[1]
+    assert "remote_access" in call(f"{page.base}/api/profile?user=me")[1]
+    # Their own things can be changed from outside.
+    status, body, _ = outside(f"{page.base}/api/answers?user=user", {"name": "salary", "value": "100k"}, cookie)
+    assert status == 200 and body["answers"]["salary"] == "100k"
+    assert "salary" not in page.hub.person("user").profile()["answers"]
+    assert call(f"{page.base}/api/users")[1]["remote"] is False
+
+
+@pytest.mark.parametrize("path", ["/api/users", "/api/users/rename", "/api/key", "/api/remote", "/api/mail/signin", "/api/mail/signin/done",
+                                  "/api/simplify/setup"])
+def test_what_only_this_computer_does_is_refused_from_outside(page: Any, path: str) -> None:
+    cookie = signed_in(page)
+    status, body, _ = outside(f"{page.base}{path}?user=me", {"name": "x", "key": "sk-orca-x", "on": True}, cookie)
+    assert status == 403 and "那台电脑" in body["error"]
+
+
+def test_a_change_from_another_site_is_refused_even_signed_in(page: Any) -> None:
+    cookie = signed_in(page)
+    status, _, _ = outside(f"{page.base}/api/answers", {"name": "salary", "value": "1"}, cookie, Origin="https://elsewhere.example")
+    assert status == 403
+
+
+def test_a_wrong_password_is_refused_and_too_many_pause_signing_in(page: Any) -> None:
+    page.hub.remote.set_host(PUBLIC)
+    password = call(f"{page.base}/api/remote?user=me", {"on": True})[1]["password"]
+    for _ in range(dashboard.LOGIN_TRIES):
+        status, body, cookie = outside(f"{page.base}/api/login", {"password": "wrong-wrong"})
+        assert status == 401 and "密码" in body["error"] and not cookie
+    status, body, _ = outside(f"{page.base}/api/login", {"password": password})
+    assert status == 409 and "15 分钟" in body["error"]
+
+
+def test_a_new_password_or_none_ends_the_sign_ins_made_before(page: Any) -> None:
+    cookie = signed_in(page)
+    assert outside(f"{page.base}/api/users", cookie=cookie)[0] == 200
+    again = call(f"{page.base}/api/remote?user=me", {"on": True})[1]["password"]
+    assert outside(f"{page.base}/api/users", cookie=cookie)[0] == 401
+    status, _, cookie = outside(f"{page.base}/api/login", {"password": again.upper()})
+    assert status == 200 and outside(f"{page.base}/api/users", cookie=cookie)[0] == 200
+    status, body = call(f"{page.base}/api/remote?user=me", {"on": False})
+    assert status == 200 and body == {"on": False, "host": PUBLIC}
+    assert outside(f"{page.base}/api/users", cookie=cookie)[0] == 401
+    assert outside(f"{page.base}/api/login", {"password": again})[0] == 401
+
+
+def test_signing_out_clears_the_cookie_and_a_forged_one_is_refused(page: Any) -> None:
+    cookie = signed_in(page)
+    status, _, cleared = outside(f"{page.base}/api/logout", {}, cookie)
+    assert status == 200 and cleared == ""
+    user, expires, _ = cookie.rsplit(".", 2)
+    assert outside(f"{page.base}/api/users", cookie=f"user.{expires}.{'0' * 64}")[0] == 401
+    assert outside(f"{page.base}/api/users", cookie=f"{user}.{int(expires) + 1}.{cookie.rsplit('.', 1)[1]}")[0] == 401
+    # The passwords are kept only as hashes, and survive a restart with the public address.
+    kept = (page.hub.root / dashboard.REMOTE_FILE).read_text(encoding="utf-8")
+    assert PUBLIC in kept and '"hash"' in kept
+    assert dashboard.Remote(page.hub.root).who(f"{dashboard.REMOTE_COOKIE}={cookie}") == "me"

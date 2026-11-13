@@ -14,9 +14,12 @@ import argparse
 import asyncio
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -60,6 +63,7 @@ from aihawk.telemetry import vendor_of
 from aihawk.tui import RETRY_PAUSES
 
 PAGE = Path(__file__).with_name("dashboard.html")
+LOGIN = Path(__file__).with_name("dashboard_login.html")
 PORT = 8765
 
 # How an application is going, as you track it. A job AIHawk sent starts at waiting, one it did not send at not_sent.
@@ -1152,6 +1156,112 @@ class Person:
         }
 
 
+REMOTE_FILE = "remote.json"
+REMOTE_COOKIE = "aihawk_remote"
+REMOTE_DAYS = 30
+# Wrong passwords tried from outside before sign-in pauses for everyone, and for how long.
+LOGIN_TRIES = 5
+LOGIN_PAUSE = 15 * 60
+# Letters and digits that cannot be mistaken for one another when read off a screen and typed.
+PASSWORD_LETTERS = "abcdefghjkmnpqrstuvwxyz23456789"
+LOCAL_ONLY_WORDS = "这一步只能在运行看板的那台电脑上做"
+
+
+class Remote:
+    """Who may use the dashboard from another computer, through a public address such as an ngrok domain. Each person who
+    should gets a password made here (kept only as a hash); a visitor who signs in with it sees and works on that person
+    alone, never anyone else, the shared key or the people. Nothing is open from outside until a password is made."""
+
+    def __init__(self, root: Path) -> None:
+        self.path = root / REMOTE_FILE
+        self._lock = threading.Lock()
+        self._failures: list[float] = []
+        data = _read_json(self.path, {})
+        data = data if isinstance(data, dict) else {}
+        if not isinstance(data.get("secret"), str) or len(data["secret"]) < 32:
+            data["secret"] = secrets.token_hex(32)
+        if not isinstance(data.get("people"), dict):
+            data["people"] = {}
+        data["host"] = data.get("host") if isinstance(data.get("host"), str) else ""
+        self._data = data
+        _write_json(self.path, data)
+
+    @property
+    def host(self) -> str:
+        return self._data["host"]
+
+    def set_host(self, address: str) -> None:
+        """The public address the tunnel serves this dashboard at ("" for none), kept for the next start."""
+        address = address.strip().lower()
+        host = (urlsplit(address if "://" in address else f"https://{address}").hostname or "") if address else ""
+        with self._lock:
+            self._data["host"] = host
+            _write_json(self.path, self._data)
+
+    def state(self, user_id: str) -> dict[str, Any]:
+        return {"on": user_id in self._data["people"], "host": self.host}
+
+    def issue(self, user_id: str) -> str:
+        """A new password for this person: the one before it, and every sign-in made with it, stop working."""
+        password = "-".join("".join(secrets.choice(PASSWORD_LETTERS) for _ in range(4)) for _ in range(4))
+        salt = secrets.token_bytes(16)
+        with self._lock:
+            self._data["people"][user_id] = {"salt": salt.hex(), "hash": self._hash(password, salt)}
+            _write_json(self.path, self._data)
+        return password
+
+    def revoke(self, user_id: str) -> None:
+        with self._lock:
+            self._data["people"].pop(user_id, None)
+            _write_json(self.path, self._data)
+
+    def login(self, password: object) -> str:
+        """The cookie for the person this password is theirs; a wrong one counts towards a pause."""
+        now = time.monotonic()
+        with self._lock:
+            self._failures = [when for when in self._failures if now - when < LOGIN_PAUSE]
+            if len(self._failures) >= LOGIN_TRIES:
+                raise Busy("密码错误次数太多，请 15 分钟后再试")
+            if isinstance(password, str) and password.strip():
+                typed = password.strip().lower()
+                for user_id, entry in self._data["people"].items():
+                    if hmac.compare_digest(self._hash(typed, bytes.fromhex(entry["salt"])), entry["hash"]):
+                        self._failures.clear()
+                        expires = int(time.time()) + REMOTE_DAYS * 86400
+                        return f"{user_id}.{expires}.{self._sign(user_id, expires)}"
+            self._failures.append(now)
+        raise PermissionError("密码不对")
+
+    def who(self, cookie: str | None) -> str | None:
+        """The person a sign-in cookie is for, while it is in date and their password has not been changed or taken away."""
+        try:
+            user_id, expires, signature = _cookie(cookie, REMOTE_COOKIE).rsplit(".", 2)
+            in_date = int(expires) > time.time()
+        except ValueError:
+            return None
+        with self._lock:
+            known = user_id in self._data["people"]
+            good = known and hmac.compare_digest(self._sign(user_id, int(expires)), signature)
+        return user_id if in_date and good else None
+
+    def _sign(self, user_id: str, expires: int) -> str:
+        # Signed with the password's hash too, so that a new password ends the sign-ins made with the old one.
+        message = f"{user_id}.{expires}.{self._data['people'][user_id]['hash']}".encode()
+        return hmac.new(bytes.fromhex(self._data["secret"]), message, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _hash(password: str, salt: bytes) -> str:
+        return hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1).hex()
+
+
+def _cookie(header: str | None, name: str) -> str:
+    for part in (header or "").split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value
+    return ""
+
+
 class Hub:
     """The dashboard's world: who uses it, the key and job database they share, and each one's Person. One batch is sent at a
     time for everyone: what an application costs is counted by one counter for the whole program (llm.SPEND), which two
@@ -1183,6 +1293,7 @@ class Hub:
         if self.key_path.is_file() and not os.environ.get(KEY_ENV, "").strip():
             os.environ[KEY_ENV] = self.key_path.read_text(encoding="utf-8-sig").strip()
         self.syncer = Syncer(self)
+        self.remote = Remote(root)
         self._lock = threading.Lock()
         self._people: dict[str, Person] = {}
 
@@ -1267,15 +1378,29 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
             # Quiet: the terminal shows the address and nothing else.
             pass
 
+        def _remote(self) -> bool:
+            # From another computer, through the tunnel: by the public address it asks for, or by the forwarding the tunnel
+            # adds (a browser on this computer adds none), whatever address it names.
+            return self.headers.get("Host", "").lower() not in hosts or any(self.headers.get(name) for name in FORWARDED)
+
         def _allowed(self) -> bool:
             # A page on another site, or another name pointed at this address, gets nothing here.
-            if self.headers.get("Host", "") not in hosts:
-                return False
+            host = self.headers.get("Host", "").lower()
             origin = self.headers.get("Origin")
+            if self._remote():
+                if not hub.remote.host or host != hub.remote.host:
+                    return False
+                return origin is None or (urlsplit(origin).netloc or "").lower() == host
             return origin is None or urlsplit(origin).netloc in hosts
 
-        def _send(self, status: int, body: bytes, kind: str) -> None:
+        def _viewer(self) -> str | None:
+            """Who signed in from another computer; None for one who has not (and for this computer, which needs none)."""
+            return hub.remote.who(self.headers.get("Cookie")) if self._remote() else None
+
+        def _send(self, status: int, body: bytes, kind: str, headers: tuple[tuple[str, str], ...] = ()) -> None:
             self.send_response(status)
+            for name, value in headers:
+                self.send_header(name, value)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
@@ -1287,32 +1412,42 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
-        def _json(self, value: Any, status: int = HTTPStatus.OK) -> None:
-            self._send(status, json.dumps(value, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+        def _json(self, value: Any, status: int = HTTPStatus.OK, headers: tuple[tuple[str, str], ...] = ()) -> None:
+            self._send(status, json.dumps(value, ensure_ascii=False).encode(), "application/json; charset=utf-8", headers)
 
         def _job_id(self) -> str:
             return parse_qs(urlsplit(self.path).query).get("id", [""])[0]
 
         def _person(self) -> Person:
+            # From outside, always the person who signed in, whoever the address names.
+            if self._remote():
+                return hub.person(self._viewer() or "")
             return hub.person(parse_qs(urlsplit(self.path).query).get("user", [""])[0])
 
         def do_GET(self) -> None:
             if not self._allowed():
                 return self._send(HTTPStatus.FORBIDDEN, b"", "text/plain")
             path = urlsplit(self.path).path
+            remote, viewer = self._remote(), self._viewer()
+            if remote and viewer is None:
+                if path == "/":
+                    return self._send(HTTPStatus.OK, LOGIN.read_bytes(), "text/html; charset=utf-8")
+                return self._json({"error": "请先登录"}, HTTPStatus.UNAUTHORIZED)
             try:
                 if path == "/":
                     return self._send(HTTPStatus.OK, PAGE.read_bytes(), "text/html; charset=utf-8")
-                # Shared by everyone.
+                # Shared by everyone; from outside, only the one who signed in is listed.
                 if path == "/api/users":
-                    return self._json({"users": hub.everyone(), "key_set": hub.key_set(), "library": hub.syncer.state()})
+                    users = [hub.summary(entry) for entry in hub.users.all() if entry["id"] == viewer] if remote else hub.everyone()
+                    return self._json({"users": users, "key_set": hub.key_set(), "library": hub.syncer.state(), "remote": remote})
                 if not path.startswith("/api/"):
                     return self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
                 # One person's.
                 person = self._person()
                 data, sender = person.data, person.sender
                 if path == "/api/profile":
-                    return self._json({**person.profile(), "key_set": hub.key_set(), "mail_sign_in": person.mail.state()})
+                    access = {} if remote else {"remote_access": hub.remote.state(person.id)}
+                    return self._json({**person.profile(), "key_set": hub.key_set(), "mail_sign_in": person.mail.state(), **access})
                 if path == "/api/search":
                     return self._json({**person.finder.state(), "library": hub.syncer.state()})
                 if path == "/api/questions":
@@ -1358,6 +1493,17 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                     return self._json({"error": "请求不完整，请重试"}, HTTPStatus.BAD_REQUEST)
                 if not isinstance(change, dict):
                     return self._json({"error": "send an object"}, HTTPStatus.BAD_REQUEST)
+                remote = self._remote()
+                if path in ("/api/login", "/api/logout"):
+                    if not remote:
+                        return self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
+                    cookie = hub.remote.login(change.get("password")) if path == "/api/login" else ""
+                    keep = f"Max-Age={REMOTE_DAYS * 86400}" if cookie else "Max-Age=0"
+                    return self._json({"ok": True}, headers=(("Set-Cookie", f"{REMOTE_COOKIE}={cookie}; Path=/; {keep}; HttpOnly; Secure; SameSite=Lax"),))
+                if remote and self._viewer() is None:
+                    return self._json({"error": "请先登录"}, HTTPStatus.UNAUTHORIZED)
+                if remote and path in LOCAL_ONLY:
+                    return self._json({"error": LOCAL_ONLY_WORDS}, HTTPStatus.FORBIDDEN)
                 # Shared by everyone.
                 if path == "/api/users":
                     return self._json(hub.add(change.get("name")), HTTPStatus.CREATED)
@@ -1367,6 +1513,12 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 # One person's.
                 person = self._person()
                 data, sender = person.data, person.sender
+                if path == "/api/remote":
+                    # This person's password for signing in from another computer: a new one (shown once), or none.
+                    if change.get("on") is True:
+                        return self._json({**hub.remote.state(person.id), "on": True, "password": hub.remote.issue(person.id)})
+                    hub.remote.revoke(person.id)
+                    return self._json(hub.remote.state(person.id))
                 if path == "/api/users/rename":
                     return self._json(hub.summary(hub.users.rename(person.id, change.get("name"))))
                 if path == "/api/resume":
@@ -1427,6 +1579,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 self._json(data.save(self._job_id(), change))
             except UnknownUser:
                 self._json({"error": "请先选择用户"}, HTTPStatus.BAD_REQUEST)
+            except PermissionError as error:
+                self._json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
             except Busy as error:
                 self._json({"error": str(error) or "正在进行中，请稍后"}, HTTPStatus.CONFLICT)
             except LookupError as error:
@@ -1448,8 +1602,13 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
 POSTS = (
     "/api/users", "/api/users/rename", "/api/key", "/api/resume", "/api/settings", "/api/answers", "/api/mail", "/api/mail/signin",
     "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/questions/add", "/api/questions/ignore", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
-    "/api/manual", "/api/manual/undo", "/api/job/delete",
+    "/api/manual", "/api/manual/undo", "/api/job/delete", "/api/remote", "/api/login", "/api/logout",
 )
+# What only this computer does: the people and the shared key, who may sign in from outside, and the browser windows that
+# open on this screen (a visitor from outside could not see them).
+LOCAL_ONLY = ("/api/users", "/api/users/rename", "/api/key", "/api/remote", "/api/mail/signin", "/api/mail/signin/done", "/api/simplify/setup")
+# Headers a tunnel adds to what it forwards.
+FORWARDED = ("X-Forwarded-For", "X-Forwarded-Host", "Forwarded")
 
 
 def main() -> None:
@@ -1459,11 +1618,18 @@ def main() -> None:
     parser.add_argument("--home", type=Path, default=default_home(), help="AIHawk's own folder, brought in as the first person on the first start")
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
+    parser.add_argument("--public-host", metavar="ADDRESS",
+                        help="the address a tunnel (ngrok) serves this dashboard at for others, e.g. name.ngrok-free.app; kept for the"
+                             " next start ('' turns it off). Each person signs in there with a password made in their Settings")
     options = parser.parse_args()
     hub = Hub(options.root.resolve(), legacy=options.home.resolve() if options.home.exists() else None)
+    if options.public_host is not None:
+        hub.remote.set_host(options.public_host)
     server = ThreadingHTTPServer(("127.0.0.1", options.port), handler(hub, options.port))
     address = f"http://127.0.0.1:{options.port}/"
     print(f"Dashboard: {address}  (Ctrl+C stops it)")
+    if hub.remote.host:
+        print(f"From other computers, through the tunnel: https://{hub.remote.host}/  (a password made in Settings signs in)")
     if not options.no_open:
         webbrowser.open(address)
     try:

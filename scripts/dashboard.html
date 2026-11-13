@@ -65,6 +65,8 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+body.remote .local-only, body:not(.remote) .remote-only { display: none !important; }
+.password { font-family: ui-monospace, Consolas, monospace; font-size: 16px; letter-spacing: 0.04em; user-select: all; }
 body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 .wrap { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 22px; margin: 0; font-weight: 600; }
@@ -270,11 +272,13 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
       <p class="sub" id="updated">读取中…</p>
     </div>
     <div class="head-actions">
-      <label class="who-pick"><span class="muted">用户</span>
+      <label class="who-pick local-only"><span class="muted">用户</span>
         <select class="pick" id="user-pick" aria-label="当前用户"></select>
       </label>
-      <button class="btn" id="user-add" type="button">新建用户</button>
+      <span class="muted remote-only" id="remote-who"></span>
+      <button class="btn local-only" id="user-add" type="button">新建用户</button>
       <button class="btn" id="refresh" type="button">刷新</button>
+      <button class="btn remote-only" id="logout" type="button">退出登录</button>
     </div>
   </header>
 
@@ -316,14 +320,15 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
         <div class="form">
           <label class="full">邮箱地址<input id="s-email" type="email" placeholder="you@gmail.com"></label>
           <label>邮箱服务<select id="s-provider"><option value="">按地址判断</option><option value="gmail">Gmail</option><option value="outlook">Outlook</option></select></label>
-          <div class="form-actions full"><button class="btn" id="s-mail-save" type="button">保存</button><button class="btn primary" id="s-mail-signin" type="button">打开浏览器登录邮箱</button><span class="status" id="s-mail-status" aria-live="polite"></span></div>
+          <div class="form-actions full"><button class="btn" id="s-mail-save" type="button">保存</button><button class="btn primary local-only" id="s-mail-signin" type="button">打开浏览器登录邮箱</button><span class="status" id="s-mail-status" aria-live="polite"></span></div>
         </div>
       </section>
       <section class="card" aria-labelledby="s-simplify-title">
         <div class="card-head"><h2 id="s-simplify-title">Simplify Copilot</h2><p class="hint">打开后，自动申请会先让 Simplify 插件按你的 Simplify 资料一键填表（通常 20 秒左右，还会上传简历），AI 再检查并补齐剩下的必填项，更快也更省钱。需要先在 AIHawk 的浏览器里装好插件并登录你的 Simplify 账号，每个用户装一次。</p></div>
         <p id="s-simplify-state"></p>
         <label class="check"><input type="checkbox" id="s-simplify-on"> 申请时先用 Simplify 填写</label>
-        <div class="row"><button class="btn" id="s-simplify-setup" type="button">打开浏览器安装并登录 Simplify</button></div>
+        <div class="row local-only"><button class="btn" id="s-simplify-setup" type="button">打开浏览器安装并登录 Simplify</button></div>
+        <p class="hint remote-only">安装或登录 Simplify、登录邮箱要打开浏览器窗口，只能在运行看板的那台电脑上做。</p>
         <p class="status" id="s-simplify-status" aria-live="polite"></p>
       </section>
       <section class="card" aria-labelledby="s-standing-title">
@@ -341,7 +346,7 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
         </div>
         <p class="status" id="s-answers-status" aria-live="polite"></p>
       </section>
-      <section class="card" aria-labelledby="s-key-title">
+      <section class="card local-only" aria-labelledby="s-key-title">
         <div class="card-head"><h2 id="s-key-title">OrcaRouter key（所有用户共用）</h2><p class="hint">读简历、打分和填表都用它，费用记在这个 key 的账户上。</p></div>
         <p id="s-key-state"></p>
         <div class="row">
@@ -350,7 +355,7 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
         </div>
         <p class="status" id="s-key-status" aria-live="polite"></p>
       </section>
-      <section class="card" aria-labelledby="s-user-title">
+      <section class="card local-only" aria-labelledby="s-user-title">
         <div class="card-head"><h2 id="s-user-title">用户</h2><p class="hint">每个用户的简历、职位、申请和浏览器登录都是分开的。</p></div>
         <div class="row">
           <input id="s-user-name" type="text" maxlength="40" aria-label="用户名字">
@@ -358,6 +363,15 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
         </div>
         <p class="hint" id="s-user-folder"></p>
         <p class="status" id="s-user-status" aria-live="polite"></p>
+      </section>
+      <section class="card local-only" aria-labelledby="s-remote-title">
+        <div class="card-head"><h2 id="s-remote-title">从别的电脑访问</h2><p class="hint">给这个用户一个密码，对方就能在自己的电脑或手机上打开看板，只看得到、操作得了这个用户的职位和申请，看不到别的用户和共用的 key。</p></div>
+        <p id="s-remote-state"></p>
+        <div class="row">
+          <button class="btn primary" id="s-remote-new" type="button">生成密码</button>
+          <button class="btn" id="s-remote-off" type="button">关闭远程访问</button>
+        </div>
+        <p class="status" id="s-remote-status" aria-live="polite"></p>
       </section>
     </div>
   </section>
@@ -948,12 +962,18 @@ function showView(view) {
 // ---------- who is using it ----------
 // The page serves one person at a time: every request names them, except the few shared by everyone.
 const SHARED = new Set(["/api/users", "/api/key"]);
-const people = { list: [], current: "", keySet: false };
+const people = { list: [], current: "", keySet: false, remote: false };
+function signedOut(response) {
+  if (response.status === 401 && people.remote) location.reload();
+  return response;
+}
 function apiFetch(url, options) {
   const path = url.split("?")[0];
-  if (SHARED.has(path) || !people.current) return fetch(url, options);
-  return fetch(`${url}${url.includes("?") ? "&" : "?"}user=${encodeURIComponent(people.current)}`, options);
+  if (SHARED.has(path) || !people.current) return fetch(url, options).then(signedOut);
+  return fetch(`${url}${url.includes("?") ? "&" : "?"}user=${encodeURIComponent(people.current)}`, options).then(signedOut);
 }
+// Seen from another computer, through a tunnel that counts every request: the page looks again less often.
+const pace = ms => people.remote ? ms * 3 : ms;
 function readLocal(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } }
 function writeLocal(key, value) { try { localStorage.setItem(key, value); } catch { /* remembered for this visit only */ } }
 
@@ -1043,7 +1063,7 @@ function renderJobs() {
       const box = el("input", { type: "checkbox", "aria-label": `选中 ${item.company} ${item.title}`, checked: chosen, disabled: sending() });
       box.addEventListener("click", e => e.stopPropagation());
       box.addEventListener("change", () => toggle(item.id, box.checked));
-      return el("tr", { class: chosen ? "chosen" : null, tabindex: "0", onclick: () => openJobDrawer(item.id),
+      return el("tr", { class: chosen ? "chosen" : null, "data-id": item.id, tabindex: "0", onclick: () => openJobDrawer(item.id),
         onkeydown: e => { if (e.key === "Enter") openJobDrawer(item.id); else if (e.key === " ") { e.preventDefault(); toggle(item.id, !jobs.selected.has(item.id)); } } },
         el("td", { class: "pick" }, box),
         el("td", { class: "num" }, scoreBadge(item.score)),
@@ -1057,6 +1077,18 @@ function renderJobs() {
   const more = document.getElementById("job-more");
   more.hidden = shown.length <= jobs.limit;
   more.textContent = `显示更多（还有 ${shown.length - jobs.limit} 个）`;
+  renderPicks(visible);
+}
+
+// What is ticked, shown on the rows already there: the table is not built again, so the page stays where it was scrolled to
+// and the box just clicked keeps its focus.
+function renderPicks(visible = jobsShown().slice(0, jobs.limit)) {
+  for (const row of document.querySelectorAll("#job-rows tr[data-id]")) {
+    const chosen = jobs.selected.has(row.dataset.id);
+    row.classList.toggle("chosen", chosen);
+    const box = row.querySelector("td.pick input");
+    if (box) box.checked = chosen;
+  }
   const all = document.getElementById("job-all");
   const picked = visible.filter(item => jobs.selected.has(item.id)).length;
   all.checked = visible.length > 0 && picked === visible.length;
@@ -1068,7 +1100,7 @@ function renderJobs() {
 function toggle(id, on) {
   if (sending()) return;
   if (on) jobs.selected.add(id); else jobs.selected.delete(id);
-  renderJobs();
+  renderPicks();
   if (state.openJobId === id) openJobDrawer(id, true);
 }
 
@@ -1285,7 +1317,7 @@ async function pollSend() {
       else if (body.results.length !== (pollSend.seen || 0)) { pollSend.seen = body.results.length; loadFound(); load(); }
     }
   } catch { /* the next poll tries again */ }
-  if (sending()) pollTimer = setTimeout(pollSend, 2000);
+  if (sending()) pollTimer = setTimeout(pollSend, pace(2000));
 }
 
 function renderProgress() {
@@ -1335,10 +1367,14 @@ function summaryWords(results) {
 // ---------- people ----------
 async function loadUsers() {
   const response = await fetch("/api/users", { cache: "no-store" });
+  if (response.status === 401) { location.reload(); return; }
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || response.status);
   people.list = body.users;
   people.keySet = body.key_set;
+  people.remote = Boolean(body.remote);
+  document.body.classList.toggle("remote", people.remote);
+  document.getElementById("remote-who").textContent = people.remote && body.users[0] ? body.users[0].name : "";
   renderUserPick();
   return body;
 }
@@ -1423,9 +1459,10 @@ function renderSettings(fillInputs = false) {
   if (!profile) return;
   const person = currentPerson();
   const steps = [];
-  if (!people.keySet) steps.push("填写下面的 OrcaRouter key（所有用户共用，只需要填一次）");
+  if (!people.keySet) steps.push(people.remote ? "请看板主人在他的电脑上填写 OrcaRouter key" : "填写下面的 OrcaRouter key（所有用户共用，只需要填一次）");
   if (!profile.has_resume) steps.push("上传简历：AIHawk 会读出要找的职位，然后开始搜索和打分");
-  if (!profile.email) steps.push("可选：填写邮箱并在浏览器里登录一次，网站发验证码时 AIHawk 才能读到");
+  if (!profile.email) steps.push(people.remote ? "可选：填写邮箱；登录邮箱要在运行看板的那台电脑上做一次，网站发验证码时 AIHawk 才能读到"
+    : "可选：填写邮箱并在浏览器里登录一次，网站发验证码时 AIHawk 才能读到");
   fill(document.getElementById("settings-guide"), (!people.keySet || !profile.has_resume) ? el("div", { class: "notice" },
     el("b", { text: `${person ? person.name : ""}，开始前还需要：` }), el("ol", {}, ...steps.map(step => el("li", { text: step })))) : null);
   fill(document.getElementById("s-resume"), profile.has_resume
@@ -1447,6 +1484,7 @@ function renderSettings(fillInputs = false) {
   renderMail(profile.mail_sign_in);
   renderSimplify(profile);
   renderStanding(profile);
+  renderRemote(profile);
   const answers = Object.entries(profile.answers);
   fill(document.getElementById("s-answers"), answers.length
     ? el("table", { class: "answers" }, el("tbody", {}, ...answers.map(([name, value]) => el("tr", {},
@@ -1709,6 +1747,38 @@ function renderStanding(profile) {
       : el("p", { class: "muted", text: "还没有固定答案。填表时 AI 自己推断的问题会出现在上面的「待确认的问题」里，确认后就会加到这里。" }));
 }
 
+// ---------- signing in from another computer ----------
+function renderRemote(profile) {
+  const access = profile.remote_access;
+  if (!access) return;
+  const address = access.host ? `https://${access.host}/` : "";
+  fill(document.getElementById("s-remote-state"),
+    !address ? el("span", { class: "muted", text: "还没有设置公网地址：先用 ngrok 开隧道，再用 --public-host 加上它的地址重新启动看板。" })
+    : access.on ? el("span", {}, "已开启。对方打开 ", el("b", { class: "mono", text: address }), " 输入密码登录。")
+    : el("span", {}, "未开启。地址：", el("b", { class: "mono", text: address })));
+  document.getElementById("s-remote-new").textContent = access.on ? "换一个新密码" : "生成密码";
+  document.getElementById("s-remote-off").hidden = !access.on;
+}
+async function remoteAccess(on, button) {
+  const person = currentPerson();
+  if (on && settings.profile.remote_access.on && !confirm("换新密码后，旧密码和用它登录的设备都会失效。继续吗？")) return;
+  if (!on && !confirm(`关闭后，${person ? person.name : "这个用户"}从别的电脑登录的都会退出。继续吗？`)) return;
+  button.disabled = true;
+  try {
+    const body = await post("/api/remote", { on });
+    settings.profile = { ...settings.profile, remote_access: { on: body.on, host: body.host } };
+    renderSettings();
+    const status = document.getElementById("s-remote-status");
+    status.className = "status";
+    if (body.password) fill(status, "新密码（只显示这一次，请现在复制发给对方）：", el("div", { class: "password", text: body.password }));
+    else status.textContent = "已关闭远程访问。";
+  } catch (error) {
+    setStatus("s-remote-status", error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 // ---------- searching and scoring ----------
 const search = { state: null, timer: null };
 const megabytes = bytes => Math.round(bytes / 1048576);
@@ -1729,7 +1799,7 @@ async function loadSearch() {
     }
   } catch { /* the next look tries again */ }
   clearTimeout(search.timer);
-  if (search.state && (search.state.running || (search.state.library && search.state.library.running))) search.timer = setTimeout(loadSearch, 2000);
+  if (search.state && (search.state.running || (search.state.library && search.state.library.running))) search.timer = setTimeout(loadSearch, pace(2000));
 }
 function renderSearch() {
   const box = document.getElementById("search-box");
@@ -1789,6 +1859,11 @@ document.getElementById("s-answer-add").addEventListener("click", async () => {
 document.getElementById("s-key-save").addEventListener("click", e => saveKey(e.currentTarget));
 document.getElementById("s-user-rename").addEventListener("click", renameUser);
 document.getElementById("refresh").addEventListener("click", refresh);
+document.getElementById("s-remote-new").addEventListener("click", e => remoteAccess(true, e.currentTarget));
+document.getElementById("s-remote-off").addEventListener("click", e => remoteAccess(false, e.currentTarget));
+document.getElementById("logout").addEventListener("click", async () => {
+  try { await fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } finally { location.replace("/"); }
+});
 document.getElementById("tab-apps").addEventListener("click", () => showView("apps"));
 document.getElementById("tab-jobs").addEventListener("click", () => showView("jobs"));
 document.getElementById("job-search").addEventListener("input", e => { jobs.search = e.target.value; jobs.limit = PAGE_ROWS; renderJobs(); });
@@ -1798,13 +1873,18 @@ document.getElementById("job-more").addEventListener("click", () => { jobs.limit
 document.getElementById("job-all").addEventListener("change", e => {
   if (sending()) return;
   for (const item of jobsShown().slice(0, jobs.limit)) { if (e.target.checked) jobs.selected.add(item.id); else jobs.selected.delete(item.id); }
-  renderJobs();
+  renderPicks();
 });
-document.getElementById("sel-clear").addEventListener("click", () => { jobs.selected.clear(); renderJobs(); });
+document.getElementById("sel-clear").addEventListener("click", () => { jobs.selected.clear(); renderPicks(); });
 document.getElementById("sel-send").addEventListener("click", openConfirm);
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDaily, 150); });
-setInterval(() => { if (!document.hidden && people.current) { load(); loadFound(); loadQuestions(); loadUsers().catch(() => {}); } }, 30000);
+let ticks = 0;
+setInterval(() => {
+  ticks += 1;
+  if (people.remote && ticks % 4) return;  // from outside, every two minutes
+  if (!document.hidden && people.current) { load(); loadFound(); loadQuestions(); loadUsers().catch(() => {}); }
+}, 30000);
 
 async function boot() {
   try {
