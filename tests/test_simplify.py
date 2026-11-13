@@ -278,3 +278,10 @@ def test_the_runner_is_told_just_before_the_send_is_clicked_and_not_in_a_trial(t
     trial = {"clicked": False}
     run(trial)
     assert not trial["clicked"]
+
+
+def test_a_page_the_add_on_already_filled_by_itself_is_not_pressed() -> None:
+    for label in ("Autofill complete!", "Autofill This Page [disabled]"):
+        browser = Panel([[{"fill-button": label}]])
+        words, made = act(browser)
+        assert browser.clicks() == [] and not made and "already filled this page by itself" in words

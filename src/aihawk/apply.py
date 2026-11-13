@@ -908,6 +908,12 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
         return (f"Simplify {done}, with a password it keeps, and opened the application: on its next page it filled what it could. "
                 "Read the page and do only what it left."), not signing
     if "fill-button" in buttons:
+        label = buttons["fill-button"]
+        if "complete" in label.lower() or label.endswith(DISABLED):
+            # The add-on filled the page by itself as it opened (seen on JazzHR: "Autofill complete!", a button that takes no
+            # click): nothing to press, and what it filled is there.
+            return ("Simplify already filled this page by itself as it opened, and attached the resume where the page asks for one. "
+                    "Read the page and do only what it left."), False
         return await _simplify_fill(session), False
     return NO_PANEL, False
 
