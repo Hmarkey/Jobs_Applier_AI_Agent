@@ -33,7 +33,16 @@ from urllib.parse import parse_qs, urlsplit
 from openai import AsyncOpenAI
 
 from aihawk import errors
-from aihawk.apply import MAILBOXES, mail_provider, missing_for_the_browser, no_browser_here, why_not_sent
+from aihawk.apply import (
+    MAILBOXES,
+    SIMPLIFY_ADDON_URL,
+    mail_provider,
+    missing_for_the_browser,
+    no_browser_here,
+    simplify_installed,
+    why_not_sent,
+)
+from aihawk.apply import sign_in as sign_in_browser
 from aihawk.config import DEFAULT_BASE_URL, DEFAULT_DATABASE, DEFAULT_MAX_AGE_DAYS, KEY_ENV, ConfigError, default_home, dry_run, load_config
 from aihawk.database import DatabaseError, load_manifest
 from aihawk.library import STATE, Library, LibraryError, Stopped
@@ -849,14 +858,18 @@ class StillNotAnswering(Exception):
     """A round of scoring got no answer after every pause."""
 
 
-class MailSignIn:
-    """One person's mailbox opened in their own browser for them to sign in, until they say on the page that they did."""
+class BrowserSetup:
+    """One person's own browser opened for them to do something by hand, until they say on the page that they did: sign in to
+    their mailbox ("mail"), or install the Simplify Copilot add-on and sign in to it ("simplify"). Then the browser closes and
+    whether it worked is checked. One at a time: both use the person's one browser profile."""
+
+    KINDS = ("mail", "simplify")
 
     def __init__(self, workspace: Path, hub: Hub) -> None:
         self.workspace = workspace
         self.hub = hub
         self._lock = threading.Lock()
-        self._state: dict[str, Any] = {"running": False, "phase": "idle", "reached": None, "error": ""}
+        self._state: dict[str, Any] = {"running": False, "kind": "", "phase": "idle", "reached": None, "error": ""}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._event: asyncio.Event | None = None
 
@@ -868,26 +881,28 @@ class MailSignIn:
         with self._lock:
             self._state.update(change)
 
-    def start(self, provider: str) -> dict[str, Any]:
-        if provider not in MAILBOXES:
+    def start(self, kind: str, provider: str = "") -> dict[str, Any]:
+        if kind not in self.KINDS:
+            raise ValueError(f"unknown setup: {kind}")
+        if kind == "mail" and provider not in MAILBOXES:
             raise ValueError("先填写 Gmail 或 Outlook 邮箱")
         with self._lock:
             if self._state["running"]:
-                raise Busy("邮箱登录窗口已经打开了")
-            self._state = {"running": True, "phase": "opening", "reached": None, "error": ""}
-        threading.Thread(target=self._run, args=(provider,), name="dashboard-mail", daemon=True).start()
+                raise Busy("浏览器已经打开了：先在那里完成，再点「我已完成」")
+            self._state = {"running": True, "kind": kind, "phase": "opening", "reached": None, "error": ""}
+        threading.Thread(target=self._run, args=(kind, provider), name=f"dashboard-{kind}", daemon=True).start()
         return self.state()
 
     def done(self) -> dict[str, Any]:
-        """The person says they signed in, or gave up: the browser is closed and the inbox checked."""
+        """The person says they finished, or gave up: the browser is closed and the result checked."""
         with self._lock:
             if self._loop is not None and self._event is not None:
                 self._loop.call_soon_threadsafe(self._event.set)
         return self.state()
 
-    def _run(self, provider: str) -> None:
+    def _run(self, kind: str, provider: str) -> None:
         try:
-            asyncio.run(self._work(provider))
+            asyncio.run(self._work(kind, provider))
         except Exception as error:  # noqa: BLE001  Said on the page.
             _record_error(error, self.hub.root)
             self._set(phase="error", error="浏览器没有打开。请关掉其他 AIHawk 窗口后重试。")
@@ -896,7 +911,7 @@ class MailSignIn:
                 self._loop = self._event = None
                 self._state["running"] = False
 
-    async def _work(self, provider: str) -> None:
+    async def _work(self, kind: str, provider: str) -> None:
         event = asyncio.Event()
         with self._lock:
             self._loop, self._event = asyncio.get_running_loop(), event
@@ -908,7 +923,12 @@ class MailSignIn:
 
         session = self.hub.session(self.workspace)
         try:
-            reached = await session.sign_in_mail(provider, wait)
+            if kind == "mail":
+                reached = await session.sign_in_mail(provider, wait)
+            else:
+                # The add-on's page, where the person adds it and then signs in to Simplify: AIHawk clicks nothing there.
+                await sign_in_browser(session.config.browser_profile, session.config.data_dir / "browser", wait, SIMPLIFY_ADDON_URL)
+                reached = simplify_installed(session.config.browser_profile)
         finally:
             session.close()
         self._set(phase="done", reached=reached)
@@ -924,7 +944,7 @@ class Person:
         self.data = Data(self.workspace, hub.library)
         self.sender = Sender(self.workspace, self.data, hub.session, log_dir=hub.root)
         self.finder = Finder(self.workspace, hub)
-        self.mail = MailSignIn(self.workspace, hub)
+        self.mail = BrowserSetup(self.workspace, hub)
 
     @property
     def name(self) -> str:
@@ -936,7 +956,7 @@ class Person:
         if self.sender.state()["running"]:
             return "正在发送申请"
         if self.mail.state()["running"]:
-            return "邮箱登录窗口开着"
+            return "浏览器设置窗口开着"
         return ""
 
     def profile(self) -> dict[str, Any]:
@@ -960,7 +980,18 @@ class Person:
             "email": answers.get("email", ""),
             "mail_provider": answers.get("mail_provider", ""),
             "answers": {name: value for name, value in answers.items() if name not in OWN_ANSWERS},
+            "simplify": config.simplify,
+            "simplify_installed": simplify_installed(config.browser_profile),
         }
+
+    def set_simplify(self, on: object) -> None:
+        """Whether this person's forms are first filled by Simplify Copilot; only once it is in their browser."""
+        if on not in (True, False):
+            raise ValueError("on 要是 true 或 false")
+        config = load_config(self.workspace)
+        if on and not simplify_installed(config.browser_profile):
+            raise ValueError("先点「打开浏览器安装 Simplify」，装好并登录后再打开")
+        save_setting(config, "simplify", "true" if on else "false")
 
     def change(self, settings: dict[str, Any]) -> None:
         """The search's settings as the page sends them: places and words to leave out as lists, the days as a number."""
@@ -1135,7 +1166,7 @@ class Hub:
             if others:
                 raise Busy(f"{others[0].name} 正在发送申请。同一时间只能有一个人在发送，请等那批结束。")
             if person.mail.state()["running"]:
-                raise Busy("邮箱登录窗口还开着：先在「设置」里点「我已登录」。")
+                raise Busy("浏览器设置窗口还开着：先在「设置」里点「我已完成」。")
             return person.sender.start(job_ids)
 
     def search(self, person: Person, resume: Path | None = None, rounds: int = FIRST_ROUNDS, search: bool = True) -> dict[str, Any]:
@@ -1273,7 +1304,14 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/mail/signin":
                     if why := person.busy():
                         raise Busy(f"现在不能打开浏览器：{why}")
-                    return self._json(person.mail.start(person.profile()["mail_provider"]), HTTPStatus.ACCEPTED)
+                    return self._json(person.mail.start("mail", person.profile()["mail_provider"]), HTTPStatus.ACCEPTED)
+                if path == "/api/simplify/setup":
+                    if why := person.busy():
+                        raise Busy(f"现在不能打开浏览器：{why}")
+                    return self._json(person.mail.start("simplify"), HTTPStatus.ACCEPTED)
+                if path == "/api/simplify":
+                    person.set_simplify(change.get("on"))
+                    return self._json(person.profile())
                 if path == "/api/mail/signin/done":
                     return self._json(person.mail.done())
                 if path == "/api/search":
@@ -1314,7 +1352,7 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
 
 POSTS = (
     "/api/users", "/api/users/rename", "/api/key", "/api/resume", "/api/settings", "/api/answers", "/api/mail", "/api/mail/signin",
-    "/api/mail/signin/done", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
+    "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
     "/api/manual", "/api/manual/undo",
 )
 

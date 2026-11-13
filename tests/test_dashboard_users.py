@@ -332,6 +332,47 @@ def test_the_page_changes_a_person_s_answers_and_rejects_a_bad_resume(page: Any)
     assert not uploads.exists() or not any(uploads.iterdir())
 
 
+def _install_simplify(workspace: Path) -> None:
+    profile = workspace / "browser-profile"
+    profile.mkdir(parents=True, exist_ok=True)
+    (profile / "extensions.json").write_text(json.dumps({"addons": [{"id": "sabre@simplify.jobs", "active": True}]}), encoding="utf-8")
+
+
+def test_simplify_is_turned_on_only_once_it_is_in_the_person_s_browser(root: Path, legacy: Path) -> None:
+    hub = dashboard.Hub(root, legacy=legacy, session=FakeSession, key_check=accept_any_key)
+    person = hub.person(hub.add("小王")["id"])
+    assert (person.profile()["simplify"], person.profile()["simplify_installed"]) == (False, False)
+    with pytest.raises(ValueError, match="安装"):
+        person.set_simplify(True)
+    _install_simplify(person.workspace)
+    person.set_simplify(True)
+    assert (person.profile()["simplify"], person.profile()["simplify_installed"]) == (True, True)
+    # Each person's own: the first one's browser has no add-on and their switch stays off.
+    assert hub.person("me").profile()["simplify"] is False
+    person.set_simplify(False)
+    assert person.profile()["simplify"] is False
+    with pytest.raises(ValueError):
+        person.set_simplify("yes")
+
+
+def test_the_browser_is_opened_for_one_thing_at_a_time(root: Path, legacy: Path) -> None:
+    hub = dashboard.Hub(root, legacy=legacy, session=FakeSession, key_check=accept_any_key)
+    setup = hub.person("me").mail
+    with pytest.raises(ValueError):
+        setup.start("chrome")
+    with pytest.raises(ValueError, match="Gmail"):
+        setup.start("mail", "later")
+
+
+def test_the_page_turns_simplify_on_and_off(page: Any) -> None:
+    status, body = call(f"{page.base}/api/simplify?user=me", {"on": True})
+    assert status == 400 and "安装" in body["error"]
+    _install_simplify(page.hub.person("me").workspace)
+    status, body = call(f"{page.base}/api/simplify?user=me", {"on": True})
+    assert status == 200 and body["simplify"] and body["simplify_installed"]
+    assert call(f"{page.base}/api/profile?user=me")[1]["simplify"] is True
+
+
 def test_the_page_keeps_the_shared_key(page: Any) -> None:
     status, body = call(f"{page.base}/api/key", {"key": "sk-orca-new"})
     assert status == 200 and body["key_set"] and os.environ[KEY_ENV] == "sk-orca-new"

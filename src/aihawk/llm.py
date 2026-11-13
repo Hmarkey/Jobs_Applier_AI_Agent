@@ -19,8 +19,14 @@ from openai import (
 
 from aihawk.config import DEFAULT_BASE_URL, KEY_ENV, KEY_URL, Config, ConfigError
 
-# The SDK's own default is ten minutes a try, and a model that hangs would hold a request that long.
-TIMEOUT = 180.0
+# The SDK's own default is ten minutes a try, and a model that hangs would hold a request that long. A form's turn answers in
+# under ten seconds (a 48,000-token one in 8 to 11, measured 2026-11-12), but on 2026-11-12 a third of OrcaRouter's requests
+# got no answer at all, at random, and an answer came at once to the same request sent again: a minute is ample for one that
+# will come, and the wait for one that will not is short.
+TIMEOUT = 60.0
+# The SDK's own tries after the first. Each is silent: the screen cannot say it waits. One is enough for a blip; a longer
+# outage is waited out by the callers' own pauses, which say so (apply.patiently, the scoring rounds' RETRY_PAUSES).
+RETRIES = 1
 
 
 # A spend's total and tokens at one moment: see Spend.mark.
@@ -277,8 +283,8 @@ def make_client(config: Config) -> AsyncOpenAI:
     key = config.api_key()
     if not key:
         raise ConfigError(f"no model key: set {KEY_ENV} (create one at {KEY_URL})")
-    # The SDK retries 429s and 5xx itself and honours Retry-After, which is all OrcaRouter sends about its limits.
-    return AsyncOpenAI(base_url=DEFAULT_BASE_URL, api_key=key, max_retries=5, timeout=TIMEOUT)
+    # The SDK retries 429s, 5xx and timeouts itself and honours Retry-After, which is all OrcaRouter sends about its limits.
+    return AsyncOpenAI(base_url=DEFAULT_BASE_URL, api_key=key, max_retries=RETRIES, timeout=TIMEOUT)
 
 
 async def structured(client: AsyncOpenAI, model: str, system: str, user: str, name: str, schema: dict[str, Any]) -> dict[str, Any]:

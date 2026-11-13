@@ -214,6 +214,9 @@ def save_setting(config: Config, name: str, value: str) -> None:
         filters.update({"locations": words, "cities": words, "countries": []})
     elif name == "exclude":
         filters["exclude"] = words
+    elif name == "simplify":
+        # A switch: kept as YAML's true or false, whatever words the screen used for it.
+        settings[name] = value.strip().lower() in ("true", "yes", "on", "1")
     elif value.strip():
         settings[name] = int(value) if name == "max_age_days" and value.strip().isdigit() else value.strip()
     else:

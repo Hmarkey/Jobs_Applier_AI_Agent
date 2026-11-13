@@ -669,6 +669,87 @@ def _secrets_in(answers: str) -> tuple[str, ...]:
     return tuple(line.split(":", 1)[1].strip() for line in answers.splitlines() if line.startswith("account_password:"))
 
 
+# Simplify Copilot, the browser add-on that fills a form from the person's Simplify profile, as it is in their browser: its panel,
+# in an open shadow root, holds the button that fills the page; once it has filled, the button says "Run Autofill Again". Seen on
+# Greenhouse and Lever with version 3.1.14 on 2026-11-12: the panel was there within 6 seconds, and the filling took 20.
+SIMPLIFY_ID = "sabre@simplify.jobs"
+SIMPLIFY_ADDON_URL = "https://addons.mozilla.org/firefox/addon/simplify-jobs/"
+SIMPLIFY_BUTTON = "#fill-button"
+SIMPLIFY_PANEL_S = 12
+SIMPLIFY_FILL_S = 60
+SIMPLIFY_POLL_S = 1.5
+# The button's words, read where it is: the page's own script cannot reach into the add-on's shadow root, but reading can.
+SIMPLIFY_LABEL = (
+    "(() => { const roots = [document]; for (let i = 0; i < roots.length; i++) for (const node of roots[i].querySelectorAll('*'))"
+    " if (node.shadowRoot) roots.push(node.shadowRoot);"
+    f" for (const root of roots) {{ const button = root.querySelector({json.dumps(SIMPLIFY_BUTTON)});"
+    " if (button) return (button.innerText || button.textContent || '').trim().replace(/\\s+/g, ' '); } return null; })()"
+)
+# How many of the form's fields hold something: what an add-on's filling changes.
+FILLED = (
+    "(() => [...document.querySelectorAll('input:not([type=hidden]), textarea, select')].filter(field =>"
+    " field.type === 'checkbox' || field.type === 'radio' ? field.checked : field.type === 'file' ? field.files.length > 0"
+    " : (field.value || '').trim() !== '').length)()"
+)
+
+
+def simplify_installed(profile: Path) -> bool:
+    """Whether Simplify Copilot is installed and on in this browser profile, as Firefox lists its add-ons."""
+    try:
+        listed = json.loads((profile / "extensions.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    addons = listed.get("addons", []) if isinstance(listed, dict) else []
+    return any(
+        isinstance(addon, dict) and addon.get("id") == SIMPLIFY_ID and addon.get("active") and not addon.get("userDisabled")
+        for addon in addons
+    )
+
+
+async def _read(session: Browser, expression: str) -> Any:
+    """What a reading of the page gives; None when it cannot be read."""
+    try:
+        result = await session.call_tool("browser_evaluate", {"expression": expression})
+        return None if result.isError else json.loads(tool_text(result))
+    except Exception:  # noqa: BLE001  A page between two loads: nothing to read.
+        return None
+
+
+async def simplify_autofill(session: Browser) -> str:
+    """Simplify Copilot fills the open form, when its panel is on the page: its button pressed with a real click, as a person
+    would (the browser refuses a click from script), and the form left to it until it says it is done. What the model is told
+    about it; empty when there was no panel, or the click did nothing, and the model fills the form alone as before."""
+    label = None
+    for _ in range(int(SIMPLIFY_PANEL_S / SIMPLIFY_POLL_S)):
+        if isinstance(label := await _read(session, SIMPLIFY_LABEL), str):
+            break
+        await asyncio.sleep(SIMPLIFY_POLL_S)
+    if not isinstance(label, str):
+        return ""
+    before = await _read(session, FILLED)
+    clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
+    if clicked.isError:
+        return ""
+    working = False
+    for _ in range(int(SIMPLIFY_FILL_S / SIMPLIFY_POLL_S)):
+        await asyncio.sleep(SIMPLIFY_POLL_S)
+        label = await _read(session, SIMPLIFY_LABEL)
+        if not isinstance(label, str):
+            continue
+        busy = "autofilling" in label.lower()
+        working = working or busy
+        if "again" in label.lower() or (working and not busy):
+            break
+    after = await _read(session, FILLED)
+    count = after - before if isinstance(after, int) and isinstance(before, int) else 0
+    return (
+        f"Simplify Copilot, a browser add-on, has just filled {max(count, 0)} fields of this form from the candidate's Simplify "
+        "profile, and may have attached a resume. Read the form before acting: keep what it filled when it is right, correct "
+        "what is wrong, and fill every required field it left empty. A resume it attached counts: upload the CV file only "
+        "when the resume field shows no file. Its panel at the side of the page is not part of the form: never use it."
+    )
+
+
 async def run_on_page(
     session: Browser,
     tools: list[dict[str, Any]],
@@ -682,6 +763,7 @@ async def run_on_page(
     guidance: str = "",
     page_rules: str = "",
     account: tuple[str, str] | None = None,
+    simplify: bool = False,
 ) -> Outcome:
     brief = (
         f"The form: {job.apply_url}\nThe job: {job.title} at {job.company}\nThe CV file to upload: {cv_file}\n"
@@ -694,6 +776,17 @@ async def run_on_page(
         traced = _Traced(session, shot.parent.parent / "trace.log", _secrets_in(answers))
         traced.note(f"== {job.company}: {job.title} at {job.apply_url}{' (dry run)' if trial else ''}")
         session = traced
+    if simplify:
+        # The add-on fills what it can first, in seconds and with no model; the model checks it and does the rest.
+        if told := NOTE.get():
+            told("Simplify Copilot is filling the form…")
+        filled = await simplify_autofill(session)
+        if told:
+            told("")
+        if tracing:
+            traced.note(f"== simplify: {filled or 'no panel, or nothing filled'}")
+        if filled:
+            brief = f"{brief}\n\n{filled}"
     report = await fill_form(session, tools, client, model, brief, guidance, page_rules)
     if tracing:
         traced.note(f"== finish_form: {json.dumps(asdict(report), ensure_ascii=False)[:500]}")
@@ -843,8 +936,10 @@ async def apply_to_job(
     profile: Path,
     guidance: str = "",
     account: tuple[str, str] | None = None,
+    simplify: bool = False,
 ) -> Outcome:
-    """Open the browser on the person's profile, fill the job's form and send it: the person's selection and Enter came before."""
+    """Open the browser on the person's profile, fill the job's form and send it: the person's selection and Enter came before.
+    With `simplify`, the Simplify Copilot add-on fills what it can first."""
     if (missing := missing_for_the_browser()) is not None:
         return Outcome("blocked", missing[1], reason=missing[0])
     shot = data_dir / "proofs" / f"{safe_name(job.id)}.png"
@@ -860,7 +955,7 @@ async def apply_to_job(
             navigated = await session.call_tool("browser_navigate", {"url": job.apply_url})
             if navigated.isError:
                 return Outcome("blocked", f"the form did not load: {tool_text(navigated)}", reason=FORM_NOT_LOADED)
-            return await run_on_page(session, tools, client, model, job, cv_text, answers, cv_file, shot, guidance, page_rules, account)
+            return await run_on_page(session, tools, client, model, job, cv_text, answers, cv_file, shot, guidance, page_rules, account, simplify)
         finally:
             await session.call_tool("browser_close", {})
 

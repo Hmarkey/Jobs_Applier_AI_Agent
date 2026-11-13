@@ -317,7 +317,9 @@ class Session:
             await self.engine_coming(note)
             cv_file = self._own_cv()
             outcome = await apply_to_job(
-                self.client, self.config.model, job, cv, answers, cv_file, self.config.data_dir, self.config.browser_profile, guidance, account)
+                self.client, self.config.model, job, cv, answers, cv_file, self.config.data_dir, self.config.browser_profile, guidance, account,
+                # Named only when on: an application without the add-on is the call it always was.
+                **({"simplify": True} if self.config.simplify else {}))
         except Exception as error:
             # One job's failure is reported and recorded; the next job still runs.
             if refused(error):

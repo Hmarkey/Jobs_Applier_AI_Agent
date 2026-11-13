@@ -95,6 +95,8 @@ class Config:
     quick_model: str = DEFAULT_QUICK_MODEL
     decision_model: str = DEFAULT_DECISION_MODEL
     filters: Filters = field(default_factory=Filters)
+    # Whether a form is first filled by the Simplify Copilot add-on in the person's browser, then checked and completed by the model.
+    simplify: bool = False
 
     @property
     def cv(self) -> Path:
@@ -168,6 +170,14 @@ def _days(value: object, name: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise ConfigError(f"{name} must be a whole number of days, not {value!r}") from None
+
+
+def _yes(value: object, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "yes", "on", "1", "false", "no", "off", "0", ""):
+        return value.strip().lower() in ("true", "yes", "on", "1")
+    raise ConfigError(f"{name} must be true or false, not {value!r}")
 
 
 def _text(value: object, name: str) -> str:
@@ -262,4 +272,5 @@ def load_config(workspace: Path) -> Config:
             _words(filters.get("countries"), "filters.countries"),
             _plan(filters.get("plan")),
         ),
+        simplify=_yes(raw.get("simplify", False), "simplify"),
     )

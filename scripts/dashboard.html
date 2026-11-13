@@ -301,6 +301,13 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
           <div class="form-actions full"><button class="btn" id="s-mail-save" type="button">保存</button><button class="btn primary" id="s-mail-signin" type="button">打开浏览器登录邮箱</button><span class="status" id="s-mail-status" aria-live="polite"></span></div>
         </div>
       </section>
+      <section class="card" aria-labelledby="s-simplify-title">
+        <div class="card-head"><h2 id="s-simplify-title">Simplify Copilot</h2><p class="hint">打开后，自动申请会先让 Simplify 插件按你的 Simplify 资料一键填表（通常 20 秒左右，还会上传简历），AI 再检查并补齐剩下的必填项，更快也更省钱。需要先在 AIHawk 的浏览器里装好插件并登录你的 Simplify 账号，每个用户装一次。</p></div>
+        <p id="s-simplify-state"></p>
+        <label class="check"><input type="checkbox" id="s-simplify-on"> 申请时先用 Simplify 填写</label>
+        <div class="row"><button class="btn" id="s-simplify-setup" type="button">打开浏览器安装并登录 Simplify</button></div>
+        <p class="status" id="s-simplify-status" aria-live="polite"></p>
+      </section>
       <section class="card" aria-labelledby="s-answers-title">
         <div class="card-head"><h2 id="s-answers-title">我的回答</h2><p class="hint">填表时告诉 AI 的信息，例如工作签证、期望薪资、到岗时间。简历里没写、表格又必填的，写在这里。</p></div>
         <div id="s-answers"></div>
@@ -1366,6 +1373,7 @@ function renderSettings(fillInputs = false) {
   }
   document.getElementById("s-search-save").disabled = !profile.has_resume;
   renderMail(profile.mail_sign_in);
+  renderSimplify(profile);
   const answers = Object.entries(profile.answers);
   fill(document.getElementById("s-answers"), answers.length
     ? el("table", { class: "answers" }, el("tbody", {}, ...answers.map(([name, value]) => el("tr", {},
@@ -1375,12 +1383,53 @@ function renderSettings(fillInputs = false) {
     : el("p", { class: "muted", text: "还没有。" }));
   document.getElementById("s-key-state").textContent = people.keySet ? "已设置。要更换的话，在下面粘贴新的 key。" : "还没有设置：读简历、打分和申请都需要它。";
 }
+function renderSimplify(profile) {
+  const sign = profile.mail_sign_in || {};
+  const box = document.getElementById("s-simplify-on");
+  box.checked = Boolean(profile.simplify);
+  box.disabled = !profile.simplify_installed;
+  document.getElementById("s-simplify-setup").disabled = Boolean(sign.running);
+  document.getElementById("s-simplify-setup").textContent = profile.simplify_installed ? "打开浏览器（重新登录或检查 Simplify）" : "打开浏览器安装并登录 Simplify";
+  document.getElementById("s-simplify-state").textContent = profile.simplify_installed
+    ? (profile.simplify ? "已安装，申请时会先用它填写。" : "已安装，目前没有使用。") : "还没有安装到这个用户的 AIHawk 浏览器里。";
+  if (sign.kind !== "simplify") return;
+  const host = document.getElementById("s-simplify-status");
+  host.className = sign.phase === "error" || (sign.phase === "done" && !sign.reached) ? "status err" : "status";
+  if (sign.phase === "opening") fill(host, "正在打开浏览器…");
+  else if (sign.phase === "waiting") {
+    fill(host, "浏览器已打开 Simplify 插件页：点「Add to Firefox」安装，再登录你的 Simplify 账号，完成后点 ",
+      el("button", { class: "btn primary", type: "button", text: "我已完成", onclick: async e => { e.currentTarget.disabled = true; try { await post("/api/mail/signin/done"); } catch { /* the next look says */ } watchMail(); } }));
+  } else if (sign.phase === "checking") fill(host, "正在检查插件是否装好…");
+  else if (sign.phase === "done") fill(host, sign.reached ? "Simplify 已装好 ✓ 可以打开上面的开关了。" : "没有找到 Simplify 插件：请再打开一次浏览器，在插件页点「Add to Firefox」。");
+  else if (sign.phase === "error") fill(host, sign.error);
+}
+async function setupSimplify() {
+  try {
+    const sign = await post("/api/simplify/setup");
+    settings.profile = { ...settings.profile, mail_sign_in: sign };
+    renderSettings();
+    watchMail();
+  } catch (error) {
+    setStatus("s-simplify-status", error.message, true);
+  }
+}
+async function toggleSimplify(box) {
+  try {
+    settings.profile = { ...settings.profile, ...await post("/api/simplify", { on: box.checked }) };
+    renderSettings();
+    setStatus("s-simplify-status", box.checked ? "已打开：之后的自动申请会先用 Simplify 填写。" : "已关闭。");
+  } catch (error) {
+    box.checked = !box.checked;
+    setStatus("s-simplify-status", error.message, true);
+  }
+}
 function renderMail(sign) {
   const host = document.getElementById("s-mail-status");
   const button = document.getElementById("s-mail-signin");
   button.disabled = Boolean(sign && sign.running);
   clearTimeout(settings.mailTimer);
-  if (!sign || sign.phase === "idle") { fill(host); return; }
+  if (sign && sign.running) settings.mailTimer = setTimeout(watchMail, 1500);
+  if (!sign || sign.phase === "idle" || sign.kind === "simplify") return;
   host.className = sign.phase === "error" || (sign.phase === "done" && !sign.reached) ? "status err" : "status";
   if (sign.phase === "opening") fill(host, "正在打开浏览器…");
   else if (sign.phase === "waiting") {
@@ -1389,13 +1438,14 @@ function renderMail(sign) {
   } else if (sign.phase === "checking") fill(host, "正在检查是否已进入收件箱…");
   else if (sign.phase === "done") fill(host, sign.reached ? "已登录邮箱 ✓" : "还没有进入收件箱：请再点一次「打开浏览器登录邮箱」。");
   else if (sign.phase === "error") fill(host, sign.error);
-  if (sign.running) settings.mailTimer = setTimeout(watchMail, 1500);
 }
+// The browser opened for the mailbox or for Simplify, watched until it is closed and checked: the whole profile is read again,
+// since whether the add-on is installed is part of it.
 async function watchMail() {
   try {
     const response = await apiFetch("/api/profile", { cache: "no-store" });
     const body = await response.json();
-    if (response.ok && settings.profile) { settings.profile.mail_sign_in = body.mail_sign_in; renderMail(body.mail_sign_in); }
+    if (response.ok && settings.profile) { settings.profile = { ...settings.profile, ...body }; renderSettings(); }
   } catch { settings.mailTimer = setTimeout(watchMail, 3000); }
 }
 function toBase64(file) {
@@ -1566,6 +1616,8 @@ document.getElementById("s-resume-go").addEventListener("click", e => uploadResu
 document.getElementById("s-search-save").addEventListener("click", e => saveSearch(e.currentTarget));
 document.getElementById("s-mail-save").addEventListener("click", saveMail);
 document.getElementById("s-mail-signin").addEventListener("click", signInMail);
+document.getElementById("s-simplify-setup").addEventListener("click", setupSimplify);
+document.getElementById("s-simplify-on").addEventListener("change", e => toggleSimplify(e.currentTarget));
 document.getElementById("s-answer-add").addEventListener("click", async () => {
   const name = document.getElementById("s-answer-name"), value = document.getElementById("s-answer-value");
   if (!name.value.trim() || !value.value.trim()) return setStatus("s-answers-status", "名称和内容都要填。", true);
