@@ -773,6 +773,9 @@ DISABLED = " [disabled]"
 # Where the browser is, as far as telling that a page moved on: the address and the page's headings.
 PAGE_MARK = "(() => location.href + ' | ' + [...document.querySelectorAll('h1, h2, h3')].map(node => node.innerText.trim()).join(' / '))()"
 NO_PANEL = "There is no Simplify panel on this page: do it yourself, by the general rules."
+# What the model is told when Simplify's button could not be pressed on a page: some sites keep it from working while a
+# cookie banner or another pop-up is up.
+COVERED = ("If a cookie banner, a consent dialog or another pop-up is over the page, close it first (reject the cookies that are not needed, where offered) and call simplify_fill once more; otherwise, or if it fails again, do this page yourself.")
 SIMPLIFY_RULES = """\
 Simplify Copilot, a browser add-on, is in this browser with the candidate's Simplify profile, and the simplify_fill tool \
 presses it for you. These rules come before the general ones on accounts and on the CV:
@@ -879,7 +882,7 @@ async def _simplify_fill(session: Browser) -> str:
     before = await _read(session, FILLED)
     clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
     if clicked.isError:
-        return f"Simplify's button did not take the click: {tool_text(clicked)[:200]}. Do this page yourself."
+        return f"Simplify's button did not take the click: {tool_text(clicked)[:200]}. {COVERED}"
     await _simplify_filling(session, pressed=True)
     after = await _read(session, FILLED)
     count = max(after - before, 0) if isinstance(after, int) and isinstance(before, int) else 0
@@ -929,7 +932,7 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
                     "Read the page and do only what it left."), False
         if label.endswith(DISABLED):
             # Greyed all the while it was waited for: still loading, or not for this page. It filled nothing.
-            return "Simplify's button stayed greyed on this page and filled nothing: do this page yourself.", False
+            return f"Simplify's button stayed greyed on this page and filled nothing. {COVERED}", False
         return await _simplify_fill(session), False
     return NO_PANEL, False
 

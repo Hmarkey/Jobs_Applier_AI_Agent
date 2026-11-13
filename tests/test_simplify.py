@@ -14,6 +14,7 @@ import pytest
 
 from aihawk import apply as apply_module
 from aihawk.apply import (
+    COVERED,
     FILLED,
     NO_PANEL,
     PAGE_MARK,
@@ -127,7 +128,7 @@ def test_a_page_with_no_panel_is_said_and_left_to_the_model() -> None:
 
 def test_a_click_that_does_not_happen_is_said() -> None:
     words, _ = act(Panel([[FILL]], click_fails=True))
-    assert "did not take the click" in words
+    assert "did not take the click" in words and COVERED in words
 
 
 def test_a_filling_that_never_says_it_ended_is_waited_for_no_longer_than_its_time() -> None:
@@ -303,7 +304,19 @@ def test_a_button_that_stays_greyed_is_said_and_not_taken_for_a_filled_page() ->
     browser = Panel([[{"fill-button": "Autofill This Page [disabled]"}]])
     words, made = act(browser)
     assert browser.clicks() == [] and not made
-    assert "stayed greyed" in words and "already filled" not in words
+    assert "stayed greyed" in words and "already filled" not in words and COVERED in words
+
+
+def test_once_the_model_closed_a_banner_its_second_simplify_fill_presses_the_button(tmp_path: Path) -> None:
+    # The first page: Simplify's button greyed all the while (a cookie banner up). The model closes the banner and calls
+    # simplify_fill again: now the button can be pressed, and is.
+    greyed = {"fill-button": "Autofill This Page [disabled]"}
+    browser = Panel([[greyed], [FILL], [FILLING, FILLED_ONCE]])
+    model = ScriptedModel([tool_call("browser_click", selector=NEXT_PAGE)], [tool_call("simplify_fill")], ready(), VERIFIED)
+    outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png", simplify=True))  # type: ignore[arg-type]
+    assert outcome.status == "submitted"
+    assert browser.clicks() == [NEXT_PAGE, SIMPLIFY_BUTTON, "#send"]
+    assert COVERED in model.requests[0]["messages"][1]["content"]
 
 
 def test_a_panel_with_none_of_its_buttons_is_no_panel_once_waited_for() -> None:
