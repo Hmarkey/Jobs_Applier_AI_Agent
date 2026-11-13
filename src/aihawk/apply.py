@@ -569,6 +569,10 @@ async def fill_form(
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": words})
                 watch.saw(name, arguments, words + str(await _read(session, PAGE_MARK)))
                 continue
+            if simplify and (check := kept_field_check(name, arguments)) and isinstance(label := await _read(session, check), str):
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": kept_refusal(label)})
+                watch.saw(name, arguments, kept_refusal(label))
+                continue
             # The plugins say two visits to the mailbox; the code holds the model to it, whatever it reasons.
             if name == "browser_navigate" and watch.one_visit_too_many(str(arguments.get("url", ""))):
                 return _blocked(NO_CODE, NO_CODE_REASON, watch.turns)
@@ -745,6 +749,8 @@ SIMPLIFY_ADDON_URL = "https://addons.mozilla.org/firefox/addon/simplify-jobs/"
 SIMPLIFY_BUTTON = "#fill-button"
 SIMPLIFY_ACCOUNT = "#account-fill-button"
 SIMPLIFY_ACCOUNT_SEND = "#account-submit-button"
+# The heading of the add-on's report on what it filled, which folds and unfolds the report.
+SIMPLIFY_REPORT = 'button:has-text("Autofill complete")'
 SIMPLIFY_PANEL_S = 15
 SIMPLIFY_FILL_S = 60
 SIMPLIFY_ACCOUNT_S = 20
@@ -791,7 +797,8 @@ opens the application. Only when it says it offers nothing there, or the page di
 account_password from the answers, or create the account with it.
 - The resume: Simplify attaches it. Never upload the CV file where a resume is already attached; upload it yourself only \
 when the resume field still shows no file after simplify_fill.
-- Keep what Simplify filled; change a field it filled only when its answer plainly belongs to another question.
+- Never change what Simplify filled, even when its answer looks wrong or belongs to another question: not its text, its \
+choices, its ticked boxes or its files. Fill only the fields it left empty. A step that would change one is refused.
 - Its panel at the side of the page is not part of the form: never click in it yourself."""
 SIMPLIFY_TOOL = {
     "type": "function",
@@ -809,6 +816,69 @@ FILLED = (
     " field.type === 'checkbox' || field.type === 'radio' ? field.checked : field.type === 'file' ? field.files.length > 0"
     " : (field.value || '').trim() !== '').length)()"
 )
+
+# What Simplify fills is kept as it filled it, right or wrong: the person's choice. Before its button is pressed, each field
+# of the page notes what it holds; after, a field that holds something new is marked as Simplify's (a radio button's whole
+# group with it), and a step of the model's that would change a marked field is refused.
+KEPT = "data-aihawk-simplify"
+_FIELD_STATE = (
+    "const fields = root => [...root.querySelectorAll('input:not([type=hidden]), textarea, select')];"
+    " const state = field => field.type === 'checkbox' || field.type === 'radio' ? (field.checked ? '1' : '')"
+    " : field.type === 'file' ? String(field.files.length) : field.multiple ? [...field.selectedOptions].map(o => o.value).join('|')"
+    " : (field.value || '').trim();"
+)
+BEFORE_SIMPLIFY = f"(() => {{ {_FIELD_STATE} for (const field of fields(document)) field.setAttribute('data-aihawk-was', state(field)); return true; }})()"
+# Whether this page's fields were noted before an earlier press: a page whose button says "Run Autofill Again" without it
+# was filled by the add-on itself as it opened, and all it holds is Simplify's.
+NOTED = "document.querySelector('[data-aihawk-was]') !== null"
+MARK_SIMPLIFY = (
+    f"(() => {{ {_FIELD_STATE} let marked = 0; const mark = field => {{ if (!field.hasAttribute('{KEPT}')) {{ field.setAttribute('{KEPT}', '1'); marked++; }} }};"
+    " for (const field of fields(document)) { const now = state(field); if (!now || now === '0') continue;"
+    " const was = field.getAttribute('data-aihawk-was'); if (was !== null && was === now) continue; mark(field);"
+    " if (field.type === 'radio' && field.name) for (const other of document.getElementsByName(field.name)) mark(other); }"
+    " return marked; })()"
+)
+# The field a step would act on, when Simplify filled it: its label, or null. A control the page sends or moves on with is
+# never one: a button, a link. Read from a CSS selector, a point on the page, or the field that has the keyboard.
+_KEPT_FIELD = (
+    "((selector, x, y, focused) => { let node = null;"
+    " try { node = focused ? document.activeElement : x !== null ? document.elementFromPoint(x, y) : document.querySelector(selector); }"
+    " catch (error) { return null; }"
+    " if (!node || node.closest('button, a[href], [type=submit], [type=button]')) return null;"
+    f" const kept = field => !!field && field.hasAttribute('{KEPT}');"
+    " const name = field => { const label = (field.labels && field.labels[0]) || field.closest('fieldset');"
+    " return ((label && label.innerText) || field.getAttribute('aria-label') || field.name || field.id || 'a field').trim().replace(/\\s+/g, ' ').slice(0, 80); };"
+    " const own = node.matches('input, textarea, select') ? node : node.control || null;"
+    " if (own) return kept(own) ? name(own) : null;"
+    " for (let up = node, level = 0; up && level < 3; up = up.parentElement, level++) {"
+    " const inside = [...up.querySelectorAll('input:not([type=hidden]), textarea, select')]; if (!inside.length) continue;"
+    " const one = inside.length === 1 || inside.every(field => field.type === 'radio' && field.name && field.name === inside[0].name);"
+    " return one && inside.every(kept) ? name(inside[0]) : null; }"
+    " return null; })"
+)
+# The model's steps that can change a field, and the keys that only move about or send.
+CHANGING = ("browser_type", "browser_select_option", "browser_upload_files", "browser_click", "browser_click_at", "browser_press_key")
+HARMLESS_KEYS = ("tab", "shift+tab", "enter", "escape")
+
+
+def kept_field_check(name: str, arguments: dict[str, Any]) -> str | None:
+    """The page reading that says which field Simplify filled the model's step would change, or None for a step that
+    changes no field."""
+    if name not in CHANGING:
+        return None
+    if name == "browser_press_key":
+        if str(arguments.get("key", "")).strip().lower() in HARMLESS_KEYS:
+            return None
+        return f"{_KEPT_FIELD}(null, null, null, true)"
+    if name == "browser_click_at":
+        return f"{_KEPT_FIELD}(null, {float(arguments.get('x', 0))}, {float(arguments.get('y', 0))}, false)"
+    return f"{_KEPT_FIELD}({json.dumps(str(arguments.get('selector', '')))}, null, null, false)"
+
+
+def kept_refusal(label: str) -> str:
+    """What the model is told when a step of its would change a field Simplify filled."""
+    return (f'Not done: Simplify filled "{label}", and what Simplify filled stays exactly as it is, even when it looks wrong. '
+            "Leave it, and fill only the fields Simplify left empty.")
 
 
 def simplify_installed(profile: Path) -> bool:
@@ -882,13 +952,24 @@ async def _moved(session: Browser, before: Any) -> bool:
     return False
 
 
-async def _simplify_fill(session: Browser) -> str:
-    """The add-on's "Autofill This Page" pressed and waited for; what it did, in a line."""
+async def _simplify_fill(session: Browser, label: str) -> str:
+    """The add-on's "Autofill This Page" (its `label` now) pressed and waited for; what it did, in a line."""
     before = await _read(session, FILLED)
+    # "Run Autofill Again" on a page this never pressed on: the add-on has been here before (Upstart, on a second visit), and
+    # what the page holds after this press is all Simplify's. Otherwise only what changes with this press is.
+    if not ("again" in label.lower() and await _read(session, NOTED) is not True):
+        await _read(session, BEFORE_SIMPLIFY)
     clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
+    if clicked.isError:
+        # On a page it filled before, the add-on's report of that fill ("Autofill complete! 8 required fields need review")
+        # lies unfolded over the button: folded, the button can be pressed.
+        with suppress(Exception):
+            await session.call_tool("browser_click", {"selector": SIMPLIFY_REPORT})
+            clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_BUTTON})
     if clicked.isError:
         return f"Simplify's button did not take the click: {tool_text(clicked)[:200]}. {COVERED}"
     await _simplify_filling(session, pressed=True)
+    await _read(session, MARK_SIMPLIFY)
     after = await _read(session, FILLED)
     count = max(after - before, 0) if isinstance(after, int) and isinstance(before, int) else 0
     return f"Simplify filled {count} fields of this page from the candidate's Simplify profile, and attaches the resume where the page asks for one."
@@ -925,6 +1006,7 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
             return ("Simplify filled the account form and pressed it, but the page did not move on: read it. An error it shows "
                     "(an account that already exists, a password refused) is for you to handle by the general rules."), False
         await _simplify_filling(session, pressed=False)
+        await _read(session, MARK_SIMPLIFY)
         done = "signed in to the candidate's account on this site" if signing else "created the candidate's account on this site"
         return (f"Simplify {done}, with a password it keeps, and opened the application: on its next page it filled what it could. "
                 "Read the page and do only what it left."), not signing
@@ -933,12 +1015,13 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
         if "complete" in label.lower():
             # The add-on filled the page by itself as it opened (seen on JazzHR: "Autofill complete!", a button that takes no
             # click): nothing to press, and what it filled is there.
+            await _read(session, MARK_SIMPLIFY)
             return ("Simplify already filled this page by itself as it opened, and attached the resume where the page asks for one. "
                     "Read the page and do only what it left."), False
         if label.endswith(DISABLED):
             # Greyed all the while it was waited for: still loading, or not for this page. It filled nothing.
             return f"Simplify's button stayed greyed on this page and filled nothing. {COVERED}", False
-        return await _simplify_fill(session), False
+        return await _simplify_fill(session, label), False
     if "start-application-button" in buttons:
         return JOB_PAGE, False
     return NO_PANEL, False

@@ -17,6 +17,7 @@ from aihawk.apply import (
     COVERED,
     FILLED,
     JOB_PAGE,
+    MARK_SIMPLIFY,
     NO_PANEL,
     PAGE_MARK,
     PASSWORDS_FILLED,
@@ -28,6 +29,8 @@ from aihawk.apply import (
     SIMPLIFY_RULES,
     SYSTEM,
     _account_line,
+    kept_field_check,
+    kept_refusal,
     run_on_page,
     simplify_act,
     simplify_autofill,
@@ -336,3 +339,39 @@ def test_a_job_page_where_the_panel_only_starts_the_application_sends_the_model_
     assert outcome.status == "submitted"
     assert browser.clicks() == [NEXT_PAGE, SIMPLIFY_BUTTON, "#send"]
     assert JOB_PAGE in model.requests[0]["messages"][1]["content"]
+
+
+def test_a_step_that_would_change_a_field_simplify_filled_is_refused_and_others_go_through(tmp_path: Path) -> None:
+    # Simplify fills the first page; the model then tries to retype a name Simplify filled (refused, never typed), types into
+    # a field Simplify left empty (done), and sends.
+    browser = Panel([[FILL], [FILLING, FILLED_ONCE]], [0, 5])
+    browser.elements["#first-name"] = "First Name (required)"  # type: ignore[assignment]  what the page reading answers
+    model = ScriptedModel(
+        [tool_call("browser_type", selector="#first-name", text="Someone"), tool_call("browser_type", selector="#linkedin", text="x")],
+        ready(), VERIFIED,
+    )
+    outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png", simplify=True))  # type: ignore[arg-type]
+    assert outcome.status == "submitted"
+    typed = [arguments["selector"] for name, arguments in browser.calls if name == "browser_type"]
+    assert typed == ["#linkedin"]
+    replies = [m["content"] for m in model.requests[1]["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
+    assert any(reply == kept_refusal("First Name (required)") for reply in replies)
+    assert any(name == "browser_evaluate" and arguments["expression"] == MARK_SIMPLIFY for name, arguments in browser.calls)
+
+
+def test_without_simplify_no_step_is_checked(tmp_path: Path) -> None:
+    browser = Panel([[None]])
+    browser.elements["#first-name"] = "First Name (required)"  # type: ignore[assignment]  what the page reading answers
+    model = ScriptedModel([tool_call("browser_type", selector="#first-name", text="Someone")], ready(), VERIFIED)
+    asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png"))  # type: ignore[arg-type]
+    assert [arguments["selector"] for name, arguments in browser.calls if name == "browser_type"] == ["#first-name"]
+
+
+def test_which_steps_are_checked_for_a_field_simplify_filled() -> None:
+    assert kept_field_check("browser_read_text", {"selector": "body"}) is None
+    assert kept_field_check("browser_press_key", {"key": "Tab"}) is None
+    assert kept_field_check("browser_press_key", {"key": "Enter"}) is None
+    assert "true)" in (kept_field_check("browser_press_key", {"key": "Backspace"}) or "")
+    assert '"#a"' in (kept_field_check("browser_select_option", {"selector": "#a", "value": "x"}) or "")
+    assert "(null, 10.0, 20.0, false)" in (kept_field_check("browser_click_at", {"x": 10, "y": 20}) or "")
+    assert "Simplify" in SIMPLIFY_RULES and "Never change what Simplify filled" in SIMPLIFY_RULES
