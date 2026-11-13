@@ -36,6 +36,7 @@ from aihawk import errors
 from aihawk.apply import (
     MAILBOXES,
     SIMPLIFY_ADDON_URL,
+    SUBMITTING,
     mail_provider,
     missing_for_the_browser,
     no_browser_here,
@@ -107,7 +108,7 @@ REASONS = {
     "browser_not_ready": "浏览器启动太慢",
     "refused_by_form": "表单拒绝了提交",
     "dry_run": "试运行，未提交",
-    "stopped": "被你终止",
+    "stopped": "被你终止（可能已发出）",
     "manual": "手动申请",
     "other": "无法填写表单",
     "no_credit": "OrcaRouter 余额不足",
@@ -436,10 +437,10 @@ def _idle() -> dict[str, Any]:
             "results": [], "log": [], "error": "", "started": "", "finished": ""}
 
 
-# What a job ended by the person says, kept with it. It counts as tried, so the page never sends it again on its own: it may
-# have been ended after the click that sends.
+# A job ended by the person. Ended before the click that sends, it is back among the jobs found, as if never tried; ended after
+# it, it may have gone, and it is kept as sent but not confirmed, with this note.
 STOPPED = "stopped"
-STOPPED_NOTE = "你在申请过程中终止了它。如果终止时已经点了提交按钮，申请可能已经发出：请打开职位链接确认。"
+STOPPED_NOTE = "你在提交过程中终止了它：终止时已经点了提交按钮，申请可能已经发出。请打开职位链接确认。"
 # A job you applied to yourself, in your own browser, and marked here as done.
 MANUAL = "manual"
 MANUAL_NOTE = "你在自己的浏览器里手动完成了这份申请，然后在看板里标记为已完成。"
@@ -547,7 +548,11 @@ class Sender:
                     self._result(job, "skipped", "已申请过或已不在列表里，跳过")
                     continue
                 self._set(number=number, current=job, note="")
+                # The task takes this mapping with its context: the application marks it just before it clicks to send.
+                submitting = {"clicked": False}
+                token = SUBMITTING.set(submitting)
                 task = asyncio.ensure_future(session.apply(item, self._log, self._note))
+                SUBMITTING.reset(token)
                 with self._lock:
                     self._loop, self._task = loop, task
                     # Asked to end before the task was there to end.
@@ -558,10 +563,15 @@ class Sender:
                 except asyncio.CancelledError:
                     if not task.cancelled():
                         raise
-                    # Ended by the person: the browser is closed by the application's own cleanup. Kept as tried, never sent again
-                    # by itself, since the click that sends may have come before the end.
-                    session.store.set_status(item.job.id, "blocked", STOPPED_NOTE, STOPPED)
-                    self._result(job, "blocked", reason_words(STOPPED), STOPPED)
+                    # Ended by the person: the browser is closed by the application's own cleanup, and nothing of it was recorded.
+                    if submitting["clicked"]:
+                        # Ended once the send was clicked: it may have gone, so it is kept as sent but not confirmed, and is
+                        # never sent again by itself.
+                        session.store.set_status(item.job.id, "unconfirmed", STOPPED_NOTE, STOPPED)
+                        self._result(job, "unconfirmed", reason_words(STOPPED), STOPPED)
+                    else:
+                        # Ended before anything was sent: the job is back among the jobs found, as it was, to try again.
+                        self._result(job, "back", "已放回「找到的职位」", STOPPED)
                     break
                 finally:
                     with self._lock:
@@ -577,7 +587,7 @@ class Sender:
     def _result(self, job: dict[str, str], status: str, words: str, reason: str = "", evidence: str = "") -> None:
         with self._lock:
             self._state["results"].append({
-                **job, "status": status, "status_words": RESULTS.get(status, "跳过" if status == "skipped" else status),
+                **job, "status": status, "status_words": RESULTS.get(status, {"skipped": "跳过", "back": "已终止"}.get(status, status)),
                 "reason": reason, "reason_words": words, "evidence": evidence, "needs_mail": reason == "mailbox_signed_out",
             })
 

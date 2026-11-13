@@ -1303,7 +1303,7 @@ function renderProgress() {
   });
   const end = el("button", { class: "btn danger", type: "button", disabled: send.terminating, text: send.terminating ? "正在终止…" : "立即终止" });
   end.addEventListener("click", async () => {
-    if (!confirm("立即终止正在进行的申请，并关闭它的浏览器？\n\n如果它正好已经点了提交按钮，这份申请可能已经发出。被终止的职位会记为「未发出：被你终止」，不会自动重发。")) return;
+    if (!confirm("立即终止正在进行的申请，并关闭它的浏览器？\n\n还没点提交的，职位会放回「找到的职位」，之后可以重新申请。如果终止时它正好已经点了提交按钮，申请可能已经发出：这时会记入申请记录（已发送未确认），不会自动重发。")) return;
     end.disabled = true;
     try { const r = await apiFetch("/api/apply/terminate", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); jobs.send = await r.json(); renderProgress(); } catch { end.disabled = false; }
   });
@@ -1317,7 +1317,8 @@ function renderProgress() {
     send.error ? el("div", { class: "notice bad", text: send.error }) : null,
     send.results.length ? el("ul", { class: "results" }, ...send.results.map(result => {
       const ok = result.status === "submitted" || result.status === "unconfirmed";
-      return el("li", {}, el("span", { class: ok ? "ok" : "no", text: result.status === "submitted" ? "✓" : result.status === "unconfirmed" ? "?" : "✗" }),
+      return el("li", {}, el("span", { class: ok ? "ok" : result.status === "back" ? "muted" : "no",
+        text: result.status === "submitted" ? "✓" : result.status === "unconfirmed" ? "?" : result.status === "back" ? "↩" : "✗" }),
         el("span", {}, el("b", { text: result.company }), ` · ${result.title} — ${result.status_words}`,
           result.reason_words && !ok ? `：${result.reason_words}` : "",
           result.needs_mail ? el("div", { class: "muted", text: "需要先登录邮箱：在 AIHawk 终端里按 e → Your mail 登录后，再从这里重新发送。" }) : null));

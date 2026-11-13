@@ -44,6 +44,10 @@ RATE_WAIT_MAX = 120.0
 # Where the application tells the screen what it waits for: set by the one that runs it, so that what the model is sent
 # and the signature of apply_to_job stay as they are.
 NOTE: ContextVar[Callable[[str], None] | None] = ContextVar("note", default=None)
+# Set by the one that runs an application and may end it midway: a mapping whose "clicked" turns true the moment the send
+# control is about to be clicked. An application ended before that sent nothing and can be tried again as if never begun;
+# one ended after it may have gone.
+SUBMITTING: ContextVar[dict[str, bool] | None] = ContextVar("submitting", default=None)
 # The mailbox may be reached this many times in one form: a code that is not there by then is not coming, and looking on costs
 # steps. A visit is an arrival from somewhere else; inside the mailbox the model moves about freely, since finding one message
 # takes several pages.
@@ -654,6 +658,9 @@ async def submit_and_verify(session: Browser, client: AsyncOpenAI, model: str, s
     # An error does not say it stayed: a form that disables its button while sending answers the click with one. What
     # may have gone must never be tried again as if it had not, so only the page decides.
     never_clicked = False
+    # From here, an application ended midway may have gone: its runner is told before the click, never after.
+    if (submitting := SUBMITTING.get()) is not None:
+        submitting["clicked"] = True
     try:
         click = await session.call_tool("browser_click", {"selector": selector})
         if click.isError:

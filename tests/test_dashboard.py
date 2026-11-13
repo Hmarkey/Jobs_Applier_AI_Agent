@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from aihawk.apply import Outcome
+from aihawk.apply import SUBMITTING, Outcome
 from aihawk.database import Job
 from aihawk.store import Store
 from fakes import load_script
@@ -59,7 +59,8 @@ class FakeSession:
 
     made: ClassVar[list[FakeSession]] = []
 
-    def __init__(self, home: Path, outcomes: dict[str, Outcome] | None = None, gate: threading.Event | None = None) -> None:
+    def __init__(self, home: Path, outcomes: dict[str, Outcome] | None = None, gate: threading.Event | None = None, clicks: bool = False) -> None:
+        self.clicks = clicks
         self.store = Store(home / "data" / "jobs.db")
         self.outcomes = outcomes or {}
         self.gate = gate
@@ -68,6 +69,9 @@ class FakeSession:
         FakeSession.made.append(self)
 
     async def apply(self, item: Any, log: Any, note: Any = None) -> Outcome:
+        if self.clicks and (submitting := SUBMITTING.get()) is not None:
+            # As the real one does just before it clicks to send.
+            submitting["clicked"] = True
         if self.gate is not None:
             while not self.gate.is_set():
                 await asyncio.sleep(0.01)
@@ -164,9 +168,9 @@ def test_stop_ends_the_batch_after_the_application_under_way(home: Path) -> None
     assert not state["stopping"]
 
 
-def test_terminate_ends_the_application_under_way_and_keeps_it_as_tried(home: Path) -> None:
+def _terminated(home: Path, clicks: bool) -> dict[str, Any]:
     never = threading.Event()
-    sender = dashboard.Sender(home, dashboard.Data(home), lambda path: FakeSession(path, gate=never))
+    sender = dashboard.Sender(home, dashboard.Data(home), lambda path: FakeSession(path, gate=never, clicks=clicks))
     sender.start([job("high").id, job("low").id])
     deadline = time.monotonic() + 10
     while sender.state()["number"] != 1:
@@ -174,17 +178,31 @@ def test_terminate_ends_the_application_under_way_and_keeps_it_as_tried(home: Pa
         time.sleep(0.01)
     assert sender.terminate()["terminating"]
     state = wait_until_done(sender)
-    assert [(r["company"], r["status"], r["reason_words"]) for r in state["results"]] == [("high Inc", "blocked", "被你终止")]
     assert FakeSession.made[-1].applied == [] and FakeSession.made[-1].closed
     assert not state["terminating"] and state["error"] == ""
-    # Kept as tried, with why: it is in the applications, not among the jobs found, and is not sent again by itself.
+    return state
+
+
+def test_an_application_ended_before_the_send_goes_back_among_the_jobs_found(home: Path) -> None:
+    state = _terminated(home, clicks=False)
+    assert [(r["company"], r["status"], r["status_words"]) for r in state["results"]] == [("high Inc", "back", "已终止")]
     data = dashboard.Data(home)
-    assert job("high").id not in {item["id"] for item in data.found()}
-    tried = next(item for item in data.items() if item["id"] == job("high").id)
-    assert tried["reason_words"] == "被你终止"
-    assert "可能已经发出" in data.details(job("high").id)["filled"]
+    found = next(item for item in data.found() if item["id"] == job("high").id)
+    # As it was: scored, with its score, to choose again; and no record of it among the applications.
+    assert (found["status"], found["score"]) == ("scored", 4.0)
+    assert job("high").id not in {item["id"] for item in data.items()}
     # The job after it was never started, and is still there to choose.
     assert job("low").id in {item["id"] for item in data.found()}
+
+
+def test_an_application_ended_after_the_send_was_clicked_is_kept_as_maybe_sent(home: Path) -> None:
+    state = _terminated(home, clicks=True)
+    assert [(r["company"], r["status"]) for r in state["results"]] == [("high Inc", "unconfirmed")]
+    data = dashboard.Data(home)
+    assert job("high").id not in {item["id"] for item in data.found()}
+    kept = next(item for item in data.items() if item["id"] == job("high").id)
+    assert kept["result"] == "unconfirmed" and kept["reason_words"] == "被你终止（可能已发出）"
+    assert "已经点了提交按钮" in data.details(job("high").id)["filled"]
 
 
 def test_terminate_when_nothing_is_sent_changes_nothing(home: Path) -> None:

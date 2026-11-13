@@ -228,3 +228,23 @@ def test_a_request_with_no_answer_is_given_up_in_a_minute_and_tried_once_more(tm
     client = make_client(load_config(tmp_path))
     assert (TIMEOUT, RETRIES) == (60.0, 1)
     assert client.timeout == TIMEOUT and client.max_retries == RETRIES
+
+
+def test_the_runner_is_told_just_before_the_send_is_clicked_and_not_in_a_trial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aihawk.apply import SUBMITTING
+    from aihawk.config import DRY_RUN_ENV
+
+    def run(flag: dict[str, bool]) -> None:
+        async def go() -> None:
+            SUBMITTING.set(flag)
+            await run_on_page(ScriptedBrowser({"#send": SUBMIT}), [], ScriptedModel(ready(), VERIFIED), "m", JOB, "cv", "a",  # type: ignore[arg-type]
+                              Path("cv.pdf"), tmp_path / "proof.png")
+        asyncio.run(go())
+
+    sent = {"clicked": False}
+    run(sent)
+    assert sent["clicked"]
+    monkeypatch.setenv(DRY_RUN_ENV, "1")
+    trial = {"clicked": False}
+    run(trial)
+    assert not trial["clicked"]
