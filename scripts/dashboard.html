@@ -178,7 +178,8 @@ dl.facts dd { margin: 0; overflow-wrap: anywhere; }
 .form .full { grid-column: 1 / -1; }
 .form input, .form select, .form textarea { border: 1px solid var(--border); background: var(--page); border-radius: 8px; padding: 6px 8px; }
 .form textarea { min-height: 80px; resize: vertical; }
-.form-actions { display: flex; align-items: center; gap: 10px; }
+.form-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.form-actions .status { flex: 1 1 100%; margin: 0; }
 .saved { font-size: 12px; color: var(--good-text); }
 .text-block { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-size: 13px; max-height: 480px; overflow-y: auto; }
 .shot img { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; display: block; }
@@ -1455,6 +1456,16 @@ function renderSettings(fillInputs = false) {
     : el("p", { class: "muted", text: "还没有。" }));
   document.getElementById("s-key-state").textContent = people.keySet ? "已设置。要更换的话，在下面粘贴新的 key。" : "还没有设置：读简历、打分和申请都需要它。";
 }
+// The person's AIHawk browser opens for one thing at a time (it is one profile): what the other card shows while it is open.
+function busyElsewhere(what) {
+  return el("span", {}, `这个用户的 AIHawk 浏览器正开着（${what}），同一时间只能开一个。在那个窗口完成后点 `,
+    el("button", { class: "btn primary", type: "button", text: "我已完成", onclick: async e => {
+      e.currentTarget.disabled = true;
+      try { await post("/api/mail/signin/done"); } catch { /* the next look says */ }
+      watchMail();
+    } }),
+    "，它会关闭，然后就能做这一步了。");
+}
 function renderSimplify(profile) {
   const sign = profile.mail_sign_in || {};
   const box = document.getElementById("s-simplify-on");
@@ -1464,6 +1475,12 @@ function renderSimplify(profile) {
   document.getElementById("s-simplify-setup").textContent = profile.simplify_installed ? "打开浏览器（重新登录或检查 Simplify）" : "打开浏览器安装并登录 Simplify";
   document.getElementById("s-simplify-state").textContent = profile.simplify_installed
     ? (profile.simplify ? "已安装，申请时会先用它填写。" : "已安装，目前没有使用。") : "还没有安装到这个用户的 AIHawk 浏览器里。";
+  if (sign.running && sign.kind === "mail") {
+    const busy = document.getElementById("s-simplify-status");
+    busy.className = "status";
+    fill(busy, busyElsewhere("邮箱登录"));
+    return;
+  }
   if (sign.kind !== "simplify") return;
   const host = document.getElementById("s-simplify-status");
   host.className = sign.phase === "error" || (sign.phase === "done" && !sign.reached) ? "status err" : "status";
@@ -1501,6 +1518,12 @@ function renderMail(sign) {
   button.disabled = Boolean(sign && sign.running);
   clearTimeout(settings.mailTimer);
   if (sign && sign.running) settings.mailTimer = setTimeout(watchMail, 1500);
+  if (sign && sign.running && sign.kind === "simplify") {
+    // The person's one browser is open for the add-on: this card says so, and can close it, instead of a grey button alone.
+    host.className = "status";
+    fill(host, busyElsewhere("Simplify 安装"));
+    return;
+  }
   if (!sign || sign.phase === "idle" || sign.kind === "simplify") return;
   host.className = sign.phase === "error" || (sign.phase === "done" && !sign.reached) ? "status err" : "status";
   if (sign.phase === "opening") fill(host, "正在打开浏览器…");
