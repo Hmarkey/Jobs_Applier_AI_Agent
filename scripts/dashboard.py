@@ -108,6 +108,7 @@ REASONS = {
     "refused_by_form": "表单拒绝了提交",
     "dry_run": "试运行，未提交",
     "stopped": "被你终止",
+    "manual": "手动申请",
     "other": "无法填写表单",
     "no_credit": "OrcaRouter 余额不足",
     "free_calls_used": "今天的免费调用已用完",
@@ -137,7 +138,8 @@ CREATE TABLE IF NOT EXISTS tracking (
     next_event TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
     interviewed INTEGER NOT NULL DEFAULT 0,
-    updated TEXT NOT NULL
+    updated TEXT NOT NULL,
+    deleted TEXT NOT NULL DEFAULT ''
 )
 """
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -170,6 +172,9 @@ class Data:
             Store(self.jobs).close()
         with self._tracking() as db:
             db.execute(TRACKING_SCHEMA)
+            # A tracking file from before records could be deleted gets the column; its rows are all kept.
+            if "deleted" not in {row[1] for row in db.execute("PRAGMA table_info(tracking)")}:
+                db.execute("ALTER TABLE tracking ADD COLUMN deleted TEXT NOT NULL DEFAULT ''")
             db.commit()
 
     @contextmanager
@@ -196,7 +201,7 @@ class Data:
             return {row["job_id"]: row for row in db.execute("SELECT * FROM tracking")}
 
     def items(self) -> list[dict[str, Any]]:
-        """Every job AIHawk tried, newest first, with how you track it."""
+        """Every job AIHawk tried, newest first, with how you track it; not one you deleted, unless AIHawk tried it again since."""
         marks = ",".join("?" * len(TRIED))
         with self._store() as db:
             rows = db.execute(
@@ -205,7 +210,32 @@ class Data:
                 TRIED,
             ).fetchall()
         tracked = self._tracked()
-        return [self._item(row, tracked.get(row["id"])) for row in rows]
+        return [self._item(row, tracked.get(row["id"])) for row in rows if not self._deleted(row, tracked.get(row["id"]))]
+
+    @staticmethod
+    def _deleted(row: sqlite3.Row, mine: sqlite3.Row | None) -> bool:
+        # Deleted as it stood then: a job AIHawk records anew after (sent again, say) is a record again.
+        return bool(mine is not None and mine["deleted"] and mine["deleted"] >= row["updated"])
+
+    def delete(self, job_ids: object) -> int:
+        """These records taken off the page, how you tracked them with them. AIHawk's store keeps each job as tried, so a
+        search never brings it back to be sent again. How many were deleted."""
+        if not isinstance(job_ids, list) or not job_ids or not all(isinstance(job_id, str) and job_id for job_id in job_ids):
+            raise ValueError("请选择要删除的记录")
+        shown = {item["id"]: item for item in self.items()}
+        chosen = [job_id for job_id in dict.fromkeys(job_ids) if job_id in shown]
+        if not chosen:
+            raise LookupError("没有可以删除的记录，请刷新")
+        now = _now()
+        with self._tracking() as db:
+            db.executemany(
+                "INSERT INTO tracking (job_id, stage, updated, deleted) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(job_id) DO UPDATE SET stage = excluded.stage, next_date = '', next_event = '', notes = '',"
+                " interviewed = 0, updated = excluded.updated, deleted = excluded.deleted",
+                [(job_id, shown[job_id]["stage"], now, now) for job_id in chosen],
+            )
+            db.commit()
+        return len(chosen)
 
     def _item(self, row: sqlite3.Row, mine: sqlite3.Row | None) -> dict[str, Any]:
         sent = row["status"] in SUBMITTED
@@ -1380,6 +1410,10 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/manual/undo":
                     data.undo_manual(self._job_id())
                     return self._json({"ok": True})
+                if path == "/api/job/delete":
+                    if sender.state()["running"] and set(change.get("ids") or []) & {job["id"] for job in sender.state()["queue"]}:
+                        raise Busy("这批正在发送的申请里有要删除的记录，等发送结束后再删")
+                    return self._json({"deleted": data.delete(change.get("ids"))})
                 self._json(data.save(self._job_id(), change))
             except UnknownUser:
                 self._json({"error": "请先选择用户"}, HTTPStatus.BAD_REQUEST)
@@ -1387,7 +1421,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 self._json({"error": str(error) or "正在进行中，请稍后"}, HTTPStatus.CONFLICT)
             except LookupError as error:
                 words = {"/api/apply": str(error), "/api/manual": "这个职位已经申请过或不在列表里了，请刷新", "/api/manual/undo": "只有手动标记的申请可以撤销",
-                         "/api/questions/add": "这个问题已经处理过了，请刷新", "/api/questions/ignore": "这个问题已经处理过了，请刷新"}
+                         "/api/questions/add": "这个问题已经处理过了，请刷新", "/api/questions/ignore": "这个问题已经处理过了，请刷新",
+                         "/api/job/delete": str(error)}
                 self._json({"error": words.get(path, "not found")}, HTTPStatus.NOT_FOUND)
             except (ValueError, ConfigError) as error:
                 self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -1403,7 +1438,7 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
 POSTS = (
     "/api/users", "/api/users/rename", "/api/key", "/api/resume", "/api/settings", "/api/answers", "/api/mail", "/api/mail/signin",
     "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/questions/add", "/api/questions/ignore", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
-    "/api/manual", "/api/manual/undo",
+    "/api/manual", "/api/manual/undo", "/api/job/delete",
 )
 
 

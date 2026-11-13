@@ -208,6 +208,7 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn.danger { border-color: var(--critical); color: var(--critical); }
 .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--critical) 10%, transparent); }
+.records-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .head-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; flex: none; }
 .notice.good { border-left-color: var(--series-3); }
 .linkish { background: none; border: 0; padding: 0; color: var(--accent); text-align: left; }
@@ -427,10 +428,10 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   </section>
 
   <section class="card">
-    <div class="card-head"><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态</p></div>
+    <div class="card-head records-head"><div><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态；勾选后可以删除</p></div><button class="btn danger" id="rec-delete" type="button" hidden>删除所选</button></div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>日期</th><th>公司</th><th>职位</th><th>网站</th><th>AIHawk 结果</th><th>跟进状态</th><th>匹配分</th><th>下一步</th></tr></thead>
+        <thead><tr><th class="pick"><input type="checkbox" id="rec-all" aria-label="选中当前显示的全部记录" title="选中当前显示的记录"></th><th>日期</th><th>公司</th><th>职位</th><th>网站</th><th>AIHawk 结果</th><th>跟进状态</th><th>匹配分</th><th>下一步</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -456,7 +457,7 @@ const GROUPS = [
 const GROUP_NAME = Object.fromEntries(GROUPS.map(g => [g.key, g.name]));
 const DAYS = 30;
 const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-const state = { items: [], stages: {}, group: "all", search: "", openId: null };
+const state = { items: [], stages: {}, group: "all", search: "", openId: null, picked: new Set() };
 
 // ---------- small helpers ----------
 function el(tag, props = {}, ...kids) {
@@ -760,10 +761,15 @@ function renderTable() {
   const rows = filtered();
   const body = document.getElementById("rows");
   if (!rows.length) {
-    body.replaceChildren(el("tr", {}, el("td", { colspan: "8", class: "empty", text: state.items.length ? "没有符合筛选的申请" : "还没有申请记录。用 AIHawk 投递后会出现在这里。" })));
+    body.replaceChildren(el("tr", {}, el("td", { colspan: "9", class: "empty", text: state.items.length ? "没有符合筛选的申请" : "还没有申请记录。用 AIHawk 投递后会出现在这里。" })));
     return;
   }
-  body.replaceChildren(...rows.map(item => el("tr", { tabindex: "0", onclick: () => openDrawer(item.id), onkeydown: e => { if (e.key === "Enter") openDrawer(item.id); } },
+  body.replaceChildren(...rows.map(item => {
+    const box = el("input", { type: "checkbox", "aria-label": `选中 ${item.company} ${item.title}`, checked: state.picked.has(item.id) });
+    box.addEventListener("click", e => e.stopPropagation());
+    box.addEventListener("change", () => { if (box.checked) state.picked.add(item.id); else state.picked.delete(item.id); renderPicked(); });
+    return el("tr", { class: state.picked.has(item.id) ? "chosen" : null, tabindex: "0", onclick: () => openDrawer(item.id), onkeydown: e => { if (e.key === "Enter") openDrawer(item.id); } },
+    el("td", { class: "pick" }, box),
     el("td", { class: "num", text: fmtDate(item) }),
     el("td", { class: "co", text: item.company }),
     el("td", { text: item.title }),
@@ -771,7 +777,45 @@ function renderTable() {
     el("td", { class: "result" }, item.result_words, item.result === "submitted" || item.result === "unconfirmed" ? null : el("div", { class: "muted", text: item.reason_words })),
     el("td", {}, el("span", { class: "stage" }, swatch(item.group), state.stages[item.stage] || item.stage)),
     el("td", { class: "num", text: typeof item.score === "number" ? item.score.toFixed(1) : "—" }),
-    el("td", {}, item.next_date ? el("span", { class: "num", text: item.next_date.slice(5) + " " }) : null, item.next_event || (item.next_date ? "" : "—")))));
+    el("td", {}, item.next_date ? el("span", { class: "num", text: item.next_date.slice(5) + " " }) : null, item.next_event || (item.next_date ? "" : "—")));
+  }));
+  renderPicked();
+}
+
+// ---------- deleting records ----------
+function renderPicked() {
+  const here = new Set(state.items.map(item => item.id));
+  for (const id of [...state.picked]) if (!here.has(id)) state.picked.delete(id);
+  const button = document.getElementById("rec-delete");
+  button.hidden = !state.picked.size;
+  button.textContent = `删除所选（${state.picked.size}）`;
+  const shown = filtered();
+  const all = document.getElementById("rec-all");
+  const picked = shown.filter(item => state.picked.has(item.id)).length;
+  all.checked = shown.length > 0 && picked === shown.length;
+  all.indeterminate = picked > 0 && picked < shown.length;
+  for (const row of document.querySelectorAll("#rows tr")) {
+    const box = row.querySelector("input[type=checkbox]");
+    if (box) row.classList.toggle("chosen", box.checked);
+  }
+}
+async function deleteRecords(ids) {
+  const items = state.items.filter(item => ids.includes(item.id));
+  if (!items.length) return false;
+  const sent = items.filter(item => item.result === "submitted" || item.result === "unconfirmed").length;
+  const names = items.slice(0, 5).map(item => `· ${item.company} · ${item.title}`).join("\n") + (items.length > 5 ? `\n… 共 ${items.length} 条` : "");
+  const warn = sent ? `\n\n其中 ${sent} 条已经发出：删除后看板不再显示它和你的跟进备注，但申请本身不会撤回。` : "";
+  if (!confirm(`删除这 ${items.length} 条记录？\n\n${names}${warn}\n\n删除后 AIHawk 也不会再申请这些职位。`)) return false;
+  try {
+    const body = await post("/api/job/delete", { ids: items.map(item => item.id) });
+    for (const item of items) state.picked.delete(item.id);
+    if (!drawer.hidden && items.some(item => item.id === state.openId)) closeDrawer();
+    await load();
+    return body.deleted > 0;
+  } catch (error) {
+    alert(`没有删除：${error.message}`);
+    return false;
+  }
 }
 
 // ---------- detail drawer ----------
@@ -836,6 +880,7 @@ async function openDrawer(id) {
       el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
     links.length ? el("div", { class: "links" }, ...links) : null,
     el("dl", { class: "facts" }, ...facts.flatMap(([name, value]) => [el("dt", { text: name }), el("dd", { text: value })])),
+    el("div", { class: "links" }, el("button", { class: "btn danger", type: "button", text: "删除这条记录", onclick: () => deleteRecords([item.id]) })),
     item.manual ? el("div", { class: "links" },
       el("button", { class: "btn", type: "button", text: "撤销手动申请", title: "标记错了：把它放回「找到的职位」", onclick: e => undoManual(item, e.currentTarget) })) : null,
     el("h3", { text: "跟进" }),
@@ -1312,6 +1357,7 @@ async function switchUser(id, view) {
   if (!confirmBox.hidden) closeConfirm();
   if (!drawer.hidden) closeDrawer();
   state.items = [];
+  state.picked.clear();
   jobs.items = [];
   jobs.meta = {};
   jobs.selected.clear();
@@ -1697,6 +1743,11 @@ async function startSearch(path) {
 
 // ---------- wiring ----------
 document.getElementById("search").addEventListener("input", e => { state.search = e.target.value; renderChips(); renderTable(); });
+document.getElementById("rec-delete").addEventListener("click", () => deleteRecords([...state.picked]));
+document.getElementById("rec-all").addEventListener("change", e => {
+  for (const item of filtered()) { if (e.target.checked) state.picked.add(item.id); else state.picked.delete(item.id); }
+  renderTable();
+});
 document.getElementById("user-pick").addEventListener("change", e => switchUser(e.target.value));
 document.getElementById("user-add").addEventListener("click", addUser);
 document.getElementById("tab-settings").addEventListener("click", () => showView("settings"));

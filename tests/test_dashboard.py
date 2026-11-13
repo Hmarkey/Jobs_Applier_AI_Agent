@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import subprocess
 import threading
 import time
 import urllib.error
@@ -204,6 +206,50 @@ def test_a_job_applied_to_by_hand_is_listed_and_tracked_as_sent(home: Path) -> N
     assert "low Inc" in (home / "applied.csv").read_text(encoding="utf-8-sig")
     # It is tracked as any other: a stage, a date, notes.
     assert data.save(job("low").id, {"stage": "interviewing", "notes": "phone screen"})["group"] == "active"
+
+
+def test_a_deleted_record_leaves_the_page_and_is_never_found_or_sent_again(home: Path) -> None:
+    data = dashboard.Data(home)
+    data.mark_manual(job("low").id)
+    data.save(job("low").id, {"notes": "to go"})
+    assert {item["company"] for item in data.items()} == {"sent Inc", "low Inc"}
+    assert data.delete([job("low").id, job("sent").id, "not one"]) == 2
+    assert data.items() == []
+    # AIHawk's store keeps both as tried: no search brings them back to send.
+    assert job("low").id not in {item["id"] for item in data.found()}
+    store = Store(home / "data" / "jobs.db")
+    assert store.get(job("low").id).status == "submitted"
+    # Tried again by AIHawk afterwards, a job is a record again, with nothing of the deleted tracking.
+    time.sleep(1.1)
+    store.set_status(job("sent").id, "submitted", "sent again")
+    store.close()
+    assert [(item["company"], item["notes"]) for item in data.items()] == [("sent Inc", "")]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node checks the page's script")
+def test_the_page_s_script_parses(tmp_path: Path) -> None:
+    page = (Path(__file__).resolve().parents[1] / "scripts" / "dashboard.html").read_text(encoding="utf-8")
+    script = tmp_path / "page.js"
+    script.write_text(page[page.index("<script>") + len("<script>") : page.rindex("</script>")], encoding="utf-8")
+    checked = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True, encoding="utf-8", check=False)
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_nothing_to_delete_is_said(home: Path) -> None:
+    data = dashboard.Data(home)
+    for wrong in (None, [], "x", [1]):
+        with pytest.raises(ValueError):
+            data.delete(wrong)
+    with pytest.raises(LookupError):
+        data.delete(["not one"])
+
+
+def test_the_page_deletes_records(server: Any) -> None:
+    status, body = call(server.at("/api/job/delete"), {"ids": [job("sent").id]})
+    assert status == 200 and body == {"deleted": 1}
+    assert call(server.at("/api/data"))[1]["items"] == []
+    status, body = call(server.at("/api/job/delete"), {"ids": [job("sent").id]})
+    assert status == 404 and "刷新" in body["error"]
 
 
 def test_a_job_already_tried_cannot_be_marked_by_hand(home: Path) -> None:
