@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from aihawk.database import Job, posting_keys
 from aihawk.secret import is_sealed, seal, unseal
@@ -53,6 +55,30 @@ CREATE TABLE IF NOT EXISTS accounts (
     made_at TEXT NOT NULL
 )
 """
+
+# The questions the model answered itself on the forms, one row per question however often it came: what it answered last,
+# and whether the person made it a standing answer (added), set it aside (ignored), or has not looked yet (new).
+ASKED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS asked (
+    key TEXT PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    options TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    last_job TEXT NOT NULL,
+    company TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'new'
+)
+"""
+ASKED_STATUSES = ("new", "added", "ignored")
+
+
+def question_key(question: str) -> str:
+    """One question however a form words its case, its punctuation and its spaces: what makes two of them the same."""
+    return re.sub(r"[\W_]+", " ", question.lower()).strip()
+
 
 ANSWERS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS answers (
@@ -170,6 +196,7 @@ class Store:
         self._db.execute(SCHEMA)
         self._db.execute(ANSWERS_SCHEMA)
         self._db.execute(ACCOUNTS_SCHEMA)
+        self._db.execute(ASKED_SCHEMA)
         # A store from before the cost was kept gets the column; the rows keep their nulls.
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(jobs)")}
         if "cost" not in columns:
@@ -376,4 +403,40 @@ class Store:
             "UPDATE jobs SET sent_at = ?, final_url = ?, verdict = ?, verdict_evidence = ?, page_text = ?, screenshot = ? WHERE id = ?",
             (proof.at or None, proof.url, proof.verdict, proof.evidence, proof.text, proof.screenshot, job_id),
         )
+        self._db.commit()
+
+    # The questions the model answered itself, for the person to make standing answers.
+
+    def note_asked(self, job: Job, items: list[dict[str, Any]]) -> None:
+        """The questions one form's model answered itself: a new one is kept to be read, one seen before is counted again, with
+        its newest answer. One the person already made a standing answer, or set aside, keeps that and is not asked again."""
+        now = _now()
+        for item in items:
+            question = str(item.get("question") or "").strip()
+            key = question_key(question)
+            if not key:
+                continue
+            answer = str(item.get("answer") or "")
+            options = json.dumps([str(option) for option in item.get("options") or []], ensure_ascii=False)
+            self._db.execute(
+                "INSERT INTO asked (key, question, answer, options, count, first_seen, last_seen, last_job, company) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET answer = excluded.answer, options = excluded.options, count = asked.count + 1,"
+                " last_seen = excluded.last_seen, last_job = excluded.last_job, company = excluded.company",
+                (key, question, answer, options, now, now, job.id, job.company),
+            )
+        self._db.commit()
+
+    def asked(self, status: str = "new") -> list[dict[str, Any]]:
+        """The questions in this state, the most often asked first."""
+        rows = self._db.execute("SELECT * FROM asked WHERE status = ? ORDER BY count DESC, last_seen DESC", (status,)).fetchall()
+        return [{**dict(row), "options": json.loads(row["options"] or "[]")} for row in rows]
+
+    def asked_one(self, key: str) -> dict[str, Any] | None:
+        row = self._db.execute("SELECT * FROM asked WHERE key = ?", (key,)).fetchone()
+        return {**dict(row), "options": json.loads(row["options"] or "[]")} if row else None
+
+    def set_asked(self, key: str, status: str) -> None:
+        if status not in ASKED_STATUSES:
+            raise ValueError(f"unknown status: {status}")
+        self._db.execute("UPDATE asked SET status = ? WHERE key = ?", (status, key))
         self._db.commit()

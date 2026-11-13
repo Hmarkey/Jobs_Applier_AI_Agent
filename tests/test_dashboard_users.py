@@ -373,6 +373,45 @@ def test_the_page_turns_simplify_on_and_off(page: Any) -> None:
     assert call(f"{page.base}/api/profile?user=me")[1]["simplify"] is True
 
 
+def _asked(workspace: Path, *items: tuple[str, str]) -> None:
+    store = Store(workspace / "data" / "jobs.db")
+    store.note_asked(job("form"), [{"question": question, "answer": answer, "options": ["Yes", "No"]} for question, answer in items])
+    store.close()
+
+
+def test_the_questions_the_ai_answered_are_decided_on_the_page_and_added_to_the_file(page: Any) -> None:
+    me = page.hub.person("me")
+    _asked(me.workspace, ("Are you willing to relocate?", "Yes"), ("Licence number?", ""))
+    status, body = call(f"{page.base}/api/questions?user=me")
+    assert status == 200 and [item["question"] for item in body["questions"]] == ["Are you willing to relocate?", "Licence number?"]
+    key = body["questions"][0]["key"]
+    status, body = call(f"{page.base}/api/questions/add?user=me", {"key": key, "answer": "Yes"})
+    assert status == 200 and [item["question"] for item in body["questions"]] == ["Licence number?"]
+    assert ("Are you willing to relocate?", "Yes") in [(entry["question"], entry["answer"]) for entry in me.profile()["standing"]]
+    status, body = call(f"{page.base}/api/questions/ignore?user=me", {"key": body["questions"][0]["key"]})
+    assert status == 200 and body["questions"] == []
+    # Decided once: a second decision on it says so.
+    status, body = call(f"{page.base}/api/questions/add?user=me", {"key": "nothing like it", "answer": "x"})
+    assert status == 404 and "处理过" in body["error"]
+
+
+def test_each_person_decides_on_their_own_questions_into_their_own_file(page: Any) -> None:
+    other = page.hub.person(page.hub.add("小王")["id"])
+    _asked(other.workspace, ("Do you need a visa?", "No"))
+    assert call(f"{page.base}/api/questions?user=me")[1]["questions"] == []
+    key = call(f"{page.base}/api/questions?user={other.id}")[1]["questions"][0]["key"]
+    call(f"{page.base}/api/questions/add?user={other.id}", {"key": key, "answer": "No"})
+    assert (other.workspace / "standing-answers.yaml").is_file()
+    assert not (page.hub.person("me").workspace / "standing-answers.yaml").exists()
+
+
+def test_a_standing_file_that_does_not_read_is_said_in_the_settings(page: Any) -> None:
+    me = page.hub.person("me")
+    (me.workspace / "standing-answers.yaml").write_text("work: [\n", encoding="utf-8")
+    profile = call(f"{page.base}/api/profile?user=me")[1]
+    assert profile["standing"] == [] and "not valid YAML" in profile["standing_error"]
+
+
 def test_the_page_keeps_the_shared_key(page: Any) -> None:
     status, body = call(f"{page.base}/api/key", {"key": "sk-orca-new"})
     assert status == 200 and body["key_set"] and os.environ[KEY_ENV] == "sk-orca-new"

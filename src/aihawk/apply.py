@@ -200,10 +200,43 @@ FINISH_TOOL = {
                 "summary": {"type": "string", "description": "What you wrote in each field, or why you are blocked."},
                 "submit_selector": {"type": "string", "description": "CSS selector of the control that sends the form; empty unless ready."},
                 "made_account": {"type": "boolean", "description": "True only if you created a candidate account on this site just now."},
+                "inferred": {
+                    "type": "array",
+                    "description": "Every question on the form you answered yourself, from the CV and the answers or by "
+                    "working it out: not one Simplify Copilot filled, not one of the standing answers, not a plain contact field "
+                    "(name, email, phone, address, LinkedIn, website). A required question you could not answer goes here too, "
+                    "with an empty answer. The candidate reads these and may make them standing answers, so give the question "
+                    "as the form words it. Empty when there was none.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["question", "answer", "options"],
+                        "properties": {
+                            "question": {"type": "string", "description": "The question, as the form words it."},
+                            "answer": {"type": "string", "description": "What you filled in or chose; empty if you could not answer."},
+                            "options": {"type": "array", "items": {"type": "string"}, "description": "A list's or a choice's options; empty for a written field."},
+                        },
+                    },
+                },
             },
         },
     },
 }
+# finish_form's list is required in the schema, so a model always says it, even empty; parsed by asked_of.
+FINISH_TOOL["function"]["parameters"]["required"].append("inferred")
+
+
+def asked_of(value: Any) -> list[dict[str, Any]]:
+    """The questions finish_form says the model answered itself, each as question, answer and options; what is not one is left out."""
+    if not isinstance(value, list):
+        return []
+    asked = []
+    for item in value[:100]:
+        if isinstance(item, dict) and isinstance(item.get("question"), str) and item["question"].strip():
+            options = item.get("options") if isinstance(item.get("options"), list) else []
+            asked.append({"question": " ".join(item["question"].split())[:500], "answer": str(item.get("answer") or "")[:2000],
+                          "options": [str(option)[:200] for option in options[:50]]})
+    return asked
 
 SYSTEM = """\
 You fill in one job application form in a browser, for the candidate, from the CV and answers given to you.
@@ -295,6 +328,8 @@ class Outcome:
     # The fields the page's own validation refused, each with its message, when the form stayed as it was after the click for
     # that reason: the form goes back to the model once with them.
     invalid: str = ""
+    # The questions the model answered itself on this form, as finish_form listed them: kept for the person to read.
+    asked: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def needs_mail(self) -> bool:
@@ -312,6 +347,7 @@ class Report:
     blocked_by: str = ""
     made_account: bool = False
     steps: int = 0
+    asked: tuple[dict[str, Any], ...] = ()
 
 
 def instructions(guidance: str, page_rules: str = "") -> str:
@@ -507,6 +543,7 @@ async def fill_form(session: Browser, tools: list[dict[str, Any]], client: Async
                 return Report(
                     str(arguments.get("status", "")), str(arguments.get("summary", "")), str(arguments.get("submit_selector", "")),
                     str(arguments.get("blocked_by") or ""), bool(arguments.get("made_account")), watch.turns,
+                    tuple(asked_of(arguments.get("inferred"))),
                 )
             # The plugins say two visits to the mailbox; the code holds the model to it, whatever it reasons.
             if name == "browser_navigate" and watch.one_visit_too_many(str(arguments.get("url", ""))):
@@ -764,7 +801,10 @@ async def run_on_page(
     page_rules: str = "",
     account: tuple[str, str] | None = None,
     simplify: bool = False,
+    standing: str = "",
 ) -> Outcome:
+    """The form filled, in this order: Simplify Copilot first when `simplify`, then the person's standing answers for what it left
+    (`standing`, as standing.brief writes them), then the model from the CV and the answers for the rest."""
     brief = (
         f"The form: {job.apply_url}\nThe job: {job.title} at {job.company}\nThe CV file to upload: {cv_file}\n"
         f"{_account_line(job, account)}\n\nThe CV:\n{cv_text}\n\nThe answers:\n{answers}"
@@ -787,18 +827,20 @@ async def run_on_page(
             traced.note(f"== simplify: {filled or 'no panel, or nothing filled'}")
         if filled:
             brief = f"{brief}\n\n{filled}"
+    if standing:
+        brief = f"{brief}\n\n{standing}"
     report = await fill_form(session, tools, client, model, brief, guidance, page_rules)
     if tracing:
         traced.note(f"== finish_form: {json.dumps(asdict(report), ensure_ascii=False)[:500]}")
     if report.status != "ready" or not report.submit_selector:
         reason = "other" if report.blocked_by in ("", "none") else report.blocked_by
-        return Outcome("blocked", report.summary, made_account=report.made_account, reason=reason, steps=report.steps)
+        return Outcome("blocked", report.summary, made_account=report.made_account, reason=reason, steps=report.steps, asked=list(report.asked))
     if trial:
         # A trial of the flow: the form is filled and the send control named, and nothing leaves for the employer.
         url, screenshot = await _where(session, shot)
         proof = Proof("", url, "", "", "", screenshot)
         summary = f"Dry run ({DRY_RUN_ENV} is set): filled, send control {report.submit_selector} found, nothing sent.\n{report.summary}"
-        return Outcome("blocked", summary, proof, made_account=report.made_account, reason=DRY_RUN, steps=report.steps)
+        return Outcome("blocked", summary, proof, made_account=report.made_account, reason=DRY_RUN, steps=report.steps, asked=list(report.asked))
     sent = await submit_and_verify(session, client, model, report.submit_selector, report.summary, guidance, shot)
     if sent.invalid:
         # Nothing was sent, and the page says which fields it wants: the model gets one more turn on the form, then one more try.
@@ -808,14 +850,15 @@ async def run_on_page(
             "not give ends the form as blocked, with that field named."
         )
         again = await fill_form(session, tools, client, model, refusal, guidance, page_rules)
-        report = replace(again, steps=report.steps + again.steps, made_account=report.made_account or again.made_account)
+        report = replace(again, steps=report.steps + again.steps, made_account=report.made_account or again.made_account, asked=report.asked + again.asked)
         if tracing:
             traced.note(f"== finish_form again: {json.dumps(asdict(report), ensure_ascii=False)[:500]}")
         if report.status != "ready" or not report.submit_selector:
             reason = "other" if report.blocked_by in ("", "none") else report.blocked_by
-            return replace(sent, status="blocked", summary=report.summary, reason=reason, made_account=report.made_account, steps=report.steps, invalid="")
+            return replace(sent, status="blocked", summary=report.summary, reason=reason, made_account=report.made_account, steps=report.steps, invalid="",
+                           asked=list(report.asked))
         sent = await submit_and_verify(session, client, model, report.submit_selector, report.summary, guidance, shot)
-    return replace(sent, made_account=report.made_account, steps=report.steps, invalid="")
+    return replace(sent, made_account=report.made_account, steps=report.steps, invalid="", asked=list(report.asked))
 
 
 def getting_the_browser(answer: str) -> str:
@@ -937,6 +980,7 @@ async def apply_to_job(
     guidance: str = "",
     account: tuple[str, str] | None = None,
     simplify: bool = False,
+    standing: str = "",
 ) -> Outcome:
     """Open the browser on the person's profile, fill the job's form and send it: the person's selection and Enter came before.
     With `simplify`, the Simplify Copilot add-on fills what it can first."""
@@ -955,7 +999,7 @@ async def apply_to_job(
             navigated = await session.call_tool("browser_navigate", {"url": job.apply_url})
             if navigated.isError:
                 return Outcome("blocked", f"the form did not load: {tool_text(navigated)}", reason=FORM_NOT_LOADED)
-            return await run_on_page(session, tools, client, model, job, cv_text, answers, cv_file, shot, guidance, page_rules, account, simplify)
+            return await run_on_page(session, tools, client, model, job, cv_text, answers, cv_file, shot, guidance, page_rules, account, simplify, standing)
         finally:
             await session.call_tool("browser_close", {})
 

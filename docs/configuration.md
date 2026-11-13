@@ -20,6 +20,12 @@ A site that needs a candidate account, such as Workday, gets one made with your 
 
 What the forms are told about you beyond the CV (email, phone, location, links, and anything you add) lives in the `answers` table of `data/jobs.db`, the SQLite file in the AIHawk folder. Press `e`, then "Your answers", to see, change or add them; an answer you gave is kept when a new resume is read. `email` and `mail_provider` (gmail or outlook) are the mailbox AIHawk opens for you to sign in to, asked the first time a form needs a site's code (not before), and again from "Your mail" in Settings; a site's code can only be read from a mailbox you are signed in to. AIHawk makes an `account_password` the first time it starts and keeps it there: the one password it uses on job sites that need an account, such as Workday, so you can sign in to those sites yourself. It is kept sealed, encrypted with a key in `data/secret.key`, and shown plain under "Your answers". The `answers.yaml` of earlier versions is read once, brought into the table and renamed `answers.yaml.imported`.
 
+## Standing answers
+
+The questions that come back on form after form with the same answer (the right to work, sponsorship, the degree, the demographic questions, the expected pay) can be answered once, in `standing-answers.yaml` beside `aihawk.yaml`. A form is filled in this order: Simplify Copilot first, when `simplify` is on, and what it filled is kept; then, for what it left, the standing answers, as written; then the model, from the CV and your answers, for the rest. The file is yours to write: sections of your choosing, each a list of entries with `question` and `answer`, and optionally `topic`, `matches` (the question's other wordings), `choose` (the options to pick in a list, in order) and `note`. An empty `answer` leaves the field empty.
+
+Every question the model answers itself is kept in the `asked` table of `data/jobs.db`, one row per question however often it comes. The dashboard's Settings lists the ones you have not decided on, with the model's answer: "加入固定答案" adds it, with the answer you give, to an `added` section at the end of the file, leaving the rest as you wrote it; "忽略" sets it aside. Either way it is not shown again.
+
 | Key | Default | What it does |
 |---|---|---|
 | `goals` | empty | What you are looking for, in your own words. Jev reads it. |

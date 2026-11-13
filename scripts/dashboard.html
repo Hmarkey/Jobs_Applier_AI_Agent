@@ -231,6 +231,16 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .answers { width: 100%; min-width: 0; }
 .answers td { padding: 6px 8px; overflow-wrap: anywhere; }
 .answers td:last-child { white-space: nowrap; text-align: right; }
+.badge { display: inline-block; margin-left: 6px; min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--critical); color: #fff; font-size: 11px; line-height: 18px; text-align: center; font-weight: 600; }
+.question-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.questions-card { margin-bottom: 12px; border-color: color-mix(in srgb, var(--series-4) 50%, var(--border)); }
+.question { border-top: 1px solid var(--border); padding: 12px 0; display: grid; gap: 6px; }
+.question:first-child { border-top: 0; }
+.question .q { font-weight: 600; }
+.question .meta { color: var(--muted); font-size: 12px; }
+.question input[type="text"] { flex: 1 1 220px; min-width: 0; border: 1px solid var(--border); background: var(--page); border-radius: 8px; padding: 6px 8px; }
+.mono { font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+.standing-list { max-height: 360px; overflow-y: auto; }
 .search-box { margin-bottom: 12px; }
 .search-box .drawer-head { align-items: center; }
 .progress { margin-bottom: 16px; }
@@ -269,11 +279,17 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   <nav class="tabs" role="tablist" aria-label="视图">
     <button class="tab" role="tab" id="tab-apps" aria-controls="view-apps" aria-selected="true" type="button">申请记录<span class="count" id="count-apps"></span></button>
     <button class="tab" role="tab" id="tab-jobs" aria-controls="view-jobs" aria-selected="false" type="button">找到的职位<span class="count" id="count-jobs"></span></button>
-    <button class="tab" role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" type="button">设置</button>
+    <button class="tab" role="tab" id="tab-settings" aria-controls="view-settings" aria-selected="false" type="button">设置<span class="badge" id="count-settings" hidden></span></button>
   </nav>
+  <div class="notice question-hint" id="question-hint" hidden></div>
 
   <section id="view-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
     <div id="settings-guide"></div>
+    <section class="card questions-card" id="s-questions-card" aria-labelledby="s-questions-title" hidden>
+      <div class="card-head"><h2 id="s-questions-title">待确认的问题</h2><p class="hint">这些是填表时 Simplify 没填、固定答案里也没有，由 AI 自己推断的问题。答案对的话点「加入固定答案」，以后遇到同类问题就直接用；也可以先改答案再加入。不想管的点「忽略」。</p></div>
+      <div id="s-questions"></div>
+      <p class="status" id="s-questions-status" aria-live="polite"></p>
+    </section>
     <div class="settings-grid">
       <section class="card" aria-labelledby="s-resume-title">
         <div class="card-head"><h2 id="s-resume-title">简历</h2><p class="hint">AIHawk 从简历里读出要搜索的职位、地点和联系方式。换简历会清掉还没申请的旧职位，重新搜索。</p></div>
@@ -307,6 +323,11 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
         <label class="check"><input type="checkbox" id="s-simplify-on"> 申请时先用 Simplify 填写</label>
         <div class="row"><button class="btn" id="s-simplify-setup" type="button">打开浏览器安装并登录 Simplify</button></div>
         <p class="status" id="s-simplify-status" aria-live="polite"></p>
+      </section>
+      <section class="card" aria-labelledby="s-standing-title">
+        <div class="card-head"><h2 id="s-standing-title">固定答案</h2><p class="hint">填表顺序：Simplify 先填 → 它没填的按这里的固定答案 → 都没有的由 AI 补。要修改或删除，直接编辑下面这个文件。</p></div>
+        <p class="hint mono" id="s-standing-file"></p>
+        <div id="s-standing"></div>
       </section>
       <section class="card" aria-labelledby="s-answers-title">
         <div class="card-head"><h2 id="s-answers-title">我的回答</h2><p class="hint">填表时告诉 AI 的信息，例如工作签证、期望薪资、到岗时间。简历里没写、表格又必填的，写在这里。</p></div>
@@ -874,6 +895,7 @@ function showView(view) {
   if (drawer.hidden && !location.hash.startsWith("#job=")) history.replaceState(null, "", `${location.pathname}${location.search}${view === "apps" ? "" : `#${view}`}`);
   if (view === "apps") renderDaily();
   if (view === "settings") loadProfile();
+  if (typeof renderQuestions === "function") renderQuestions();
   renderSubtitle();
 }
 
@@ -923,6 +945,7 @@ async function refresh() {
   const button = document.getElementById("refresh");
   if (button.disabled || !people.current) return;
   loadSearch();
+  loadQuestions();
   loadUsers().catch(() => {});
   if (state.view === "settings") loadProfile();
   const before = { found: jobs.items.length, scored: jobs.items.filter(item => typeof item.score === "number").length, apps: state.items.length };
@@ -1212,7 +1235,7 @@ async function pollSend() {
       jobs.send = body;
       renderProgress();
       renderSelbar();
-      if (wasRunning && !body.running) { await loadFound(); await load(); }
+      if (wasRunning && !body.running) { await loadFound(); await load(); loadQuestions(); }
       else if (body.results.length !== (pollSend.seen || 0)) { pollSend.seen = body.results.length; loadFound(); load(); }
     }
   } catch { /* the next poll tries again */ }
@@ -1303,7 +1326,8 @@ async function switchUser(id, view) {
   renderUserPick();
   const person = currentPerson();
   showView(view || (person && !person.has_resume ? "settings" : state.view || "apps"));
-  await Promise.all([load(), loadFound(), loadSearch()]);
+  questions.list = [];
+  await Promise.all([load(), loadFound(), loadSearch(), loadQuestions()]);
   pollSend();
 }
 async function addUser() {
@@ -1374,6 +1398,7 @@ function renderSettings(fillInputs = false) {
   document.getElementById("s-search-save").disabled = !profile.has_resume;
   renderMail(profile.mail_sign_in);
   renderSimplify(profile);
+  renderStanding(profile);
   const answers = Object.entries(profile.answers);
   fill(document.getElementById("s-answers"), answers.length
     ? el("table", { class: "answers" }, el("tbody", {}, ...answers.map(([name, value]) => el("tr", {},
@@ -1551,6 +1576,69 @@ async function renameUser() {
   }
 }
 
+// ---------- the questions the AI answered itself, and the standing answers ----------
+const questions = { list: [] };
+async function loadQuestions() {
+  if (!people.current) return;
+  const asked = people.current;
+  try {
+    const response = await apiFetch("/api/questions", { cache: "no-store" });
+    const body = await response.json();
+    if (response.ok && asked === people.current) questions.list = body.questions;
+  } catch { /* the next look tries again */ }
+  renderQuestions();
+}
+function renderQuestions() {
+  const count = questions.list.length;
+  const badge = document.getElementById("count-settings");
+  badge.hidden = !count;
+  badge.textContent = count;
+  const hint = document.getElementById("question-hint");
+  hint.hidden = !count || state.view === "settings";
+  fill(hint, `有 ${count} 个 AI 自己推断的问题待你确认：确认答案后加入固定答案，以后遇到就直接用。`,
+    el("button", { class: "btn", type: "button", text: "去设置查看", onclick: () => showView("settings") }));
+  const card = document.getElementById("s-questions-card");
+  card.hidden = !count;
+  fill(document.getElementById("s-questions"), ...questions.list.map(item => {
+    const input = el("input", { type: "text", value: item.answer, "aria-label": `「${item.question}」的答案`, placeholder: "AI 没能回答：填上你的答案" });
+    const listId = `q-options-${item.key.replace(/[^a-z0-9]+/g, "-").slice(0, 40)}`;
+    if (item.options.length) input.setAttribute("list", listId);
+    const add = el("button", { class: "btn primary", type: "button", text: "加入固定答案" });
+    add.addEventListener("click", () => decideQuestion(item, true, input.value, add));
+    const skip = el("button", { class: "btn", type: "button", text: "忽略" });
+    skip.addEventListener("click", () => decideQuestion(item, false, "", skip));
+    return el("div", { class: "question" },
+      el("div", { class: "q", text: item.question }),
+      el("div", { class: "meta", text: `最近出现在 ${item.company || "—"} 的表单 · 共 ${item.count} 次${item.answer ? "" : " · AI 没能回答"}` }),
+      item.options.length ? el("div", { class: "chips" }, ...item.options.slice(0, 12).map(option => el("span", { text: option }))) : null,
+      item.options.length ? el("datalist", { id: listId }, ...item.options.map(option => el("option", { value: option }))) : null,
+      el("div", { class: "row" }, input, add, skip));
+  }));
+}
+async function decideQuestion(item, add, answer, button) {
+  if (add && !answer.trim() && !confirm(`把「${item.question}」的固定答案设为空？以后遇到这个问题会留空不填。`)) return;
+  button.disabled = true;
+  try {
+    const body = await post(add ? "/api/questions/add" : "/api/questions/ignore", { key: item.key, answer });
+    questions.list = body.questions;
+    renderQuestions();
+    setStatus("s-questions-status", add ? `已加入固定答案：${item.question}` : "已忽略。");
+    if (add) loadProfile();
+  } catch (error) {
+    button.disabled = false;
+    setStatus("s-questions-status", error.message, true);
+  }
+}
+function renderStanding(profile) {
+  document.getElementById("s-standing-file").textContent = profile.standing_file ? `文件：${profile.standing_file}` : "";
+  fill(document.getElementById("s-standing"),
+    profile.standing_error ? el("div", { class: "notice bad", text: `这个文件读不出来：${profile.standing_error}` }) : null,
+    profile.standing.length
+      ? el("div", { class: "standing-list" }, el("table", { class: "answers" }, el("tbody", {}, ...profile.standing.map(entry =>
+        el("tr", {}, el("td", { class: "muted", text: entry.question }), el("td", { text: entry.answer || "（留空）" }))))))
+      : el("p", { class: "muted", text: "还没有固定答案。填表时 AI 自己推断的问题会出现在上面的「待确认的问题」里，确认后就会加到这里。" }));
+}
+
 // ---------- searching and scoring ----------
 const search = { state: null, timer: null };
 const megabytes = bytes => Math.round(bytes / 1048576);
@@ -1641,7 +1729,7 @@ document.getElementById("sel-clear").addEventListener("click", () => { jobs.sele
 document.getElementById("sel-send").addEventListener("click", openConfirm);
 let resizeTimer;
 window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderDaily, 150); });
-setInterval(() => { if (!document.hidden && people.current) { load(); loadFound(); loadUsers().catch(() => {}); } }, 30000);
+setInterval(() => { if (!document.hidden && people.current) { load(); loadFound(); loadQuestions(); loadUsers().catch(() => {}); } }, 30000);
 
 async function boot() {
   try {

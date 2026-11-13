@@ -51,6 +51,9 @@ from aihawk.profile import CV_NAME_FILE, save_setting
 from aihawk.scoring import NotAnswering
 from aihawk.screens import readable
 from aihawk.session import BALANCE_PATH, WIDE, Session
+from aihawk.standing import append as append_standing
+from aihawk.standing import load as load_standing
+from aihawk.standing import path_of as standing_path
 from aihawk.store import OWN_ANSWERS, SENT_WORDS, SUBMITTED, Proof, Store, write_applied
 from aihawk.telemetry import vendor_of
 from aihawk.tui import RETRY_PAUSES
@@ -492,6 +495,9 @@ class Sender:
         except Exception as error:  # noqa: BLE001  Said on the page, with its details in AIHawk's error log.
             if refused(error):
                 words = "OrcaRouter 不认现在的 key：在「设置」里换一个后再试。"
+            elif isinstance(error, ConfigError):
+                # A settings file or the standing answers that cannot be read: the person's to mend, and the line says which.
+                words = f"发送中断：{error}"
             else:
                 _record_error(error, self.log_dir)
                 words = f"发送中断：{type(error).__name__}，详情见 {(self.log_dir or self.home / 'data') / errors.LOG}。"
@@ -982,7 +988,44 @@ class Person:
             "answers": {name: value for name, value in answers.items() if name not in OWN_ANSWERS},
             "simplify": config.simplify,
             "simplify_installed": simplify_installed(config.browser_profile),
+            **self.standing(),
         }
+
+    def standing(self) -> dict[str, Any]:
+        """The person's standing answers as the settings show them: where the file is, and each question with its answer."""
+        path = standing_path(self.workspace)
+        try:
+            entries, problem = load_standing(self.workspace), ""
+        except ConfigError as error:
+            entries, problem = [], str(error)
+        return {"standing_file": str(path), "standing": [{"question": entry["question"], "answer": entry["answer"]} for entry in entries],
+                "standing_error": problem}
+
+    def questions(self) -> list[dict[str, Any]]:
+        """The questions the model answered itself on this person's forms and that they have not decided on yet."""
+        store = Store(self.workspace / "data" / "jobs.db")
+        try:
+            return store.asked("new")
+        finally:
+            store.close()
+
+    def decide(self, key: object, add: bool, answer: object = "") -> list[dict[str, Any]]:
+        """A question made a standing answer, with the answer the person gives it, or set aside; the questions still to decide."""
+        if not isinstance(key, str) or not key:
+            raise ValueError("请选择一个问题")
+        store = Store(self.workspace / "data" / "jobs.db")
+        try:
+            asked = store.asked_one(key)
+            if asked is None:
+                raise LookupError(key)
+            if add:
+                if not isinstance(answer, str):
+                    raise ValueError("答案要是文字")
+                append_standing(self.workspace, asked["question"], answer, asked["options"])
+            store.set_asked(key, "added" if add else "ignored")
+            return store.asked("new")
+        finally:
+            store.close()
 
     def set_simplify(self, on: object) -> None:
         """Whether this person's forms are first filled by Simplify Copilot; only once it is in their browser."""
@@ -1232,6 +1275,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                     return self._json({**person.profile(), "key_set": hub.key_set(), "mail_sign_in": person.mail.state()})
                 if path == "/api/search":
                     return self._json({**person.finder.state(), "library": hub.syncer.state()})
+                if path == "/api/questions":
+                    return self._json({"questions": person.questions()})
                 if path == "/api/data":
                     return self._json({"items": data.items(), "stages": STAGES, "groups": GROUPS, "now": datetime.now(UTC).isoformat()})
                 if path == "/api/job":
@@ -1312,6 +1357,10 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/simplify":
                     person.set_simplify(change.get("on"))
                     return self._json(person.profile())
+                if path == "/api/questions/add":
+                    return self._json({"questions": person.decide(change.get("key"), True, change.get("answer", ""))})
+                if path == "/api/questions/ignore":
+                    return self._json({"questions": person.decide(change.get("key"), False)})
                 if path == "/api/mail/signin/done":
                     return self._json(person.mail.done())
                 if path == "/api/search":
@@ -1337,7 +1386,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
             except Busy as error:
                 self._json({"error": str(error) or "正在进行中，请稍后"}, HTTPStatus.CONFLICT)
             except LookupError as error:
-                words = {"/api/apply": str(error), "/api/manual": "这个职位已经申请过或不在列表里了，请刷新", "/api/manual/undo": "只有手动标记的申请可以撤销"}
+                words = {"/api/apply": str(error), "/api/manual": "这个职位已经申请过或不在列表里了，请刷新", "/api/manual/undo": "只有手动标记的申请可以撤销",
+                         "/api/questions/add": "这个问题已经处理过了，请刷新", "/api/questions/ignore": "这个问题已经处理过了，请刷新"}
                 self._json({"error": words.get(path, "not found")}, HTTPStatus.NOT_FOUND)
             except (ValueError, ConfigError) as error:
                 self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -1352,7 +1402,7 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
 
 POSTS = (
     "/api/users", "/api/users/rename", "/api/key", "/api/resume", "/api/settings", "/api/answers", "/api/mail", "/api/mail/signin",
-    "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
+    "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/questions/add", "/api/questions/ignore", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
     "/api/manual", "/api/manual/undo",
 )
 

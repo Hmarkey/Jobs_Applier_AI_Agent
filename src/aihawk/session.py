@@ -23,6 +23,8 @@ from aihawk.llm import ACCOUNT_CAUSES, SPEND, Mark, cause, make_client, no_credi
 from aihawk.plugins import Plugin, always_plugins, load_plugins, plugin_for
 from aihawk.profile import CV_NAME_FILE, ensure_account_password, import_answers_file, install_resume, save_setting
 from aihawk.scoring import NOT_JUDGED, NotAnswering, fits, question, score
+from aihawk.standing import brief as standing_brief
+from aihawk.standing import load as load_standing
 from aihawk.store import SUBMITTED, Store, Stored, write_applied
 from aihawk.telemetry import Telemetry
 
@@ -303,6 +305,8 @@ class Session:
         cv = self.config.cv.read_text(encoding="utf-8-sig")
         job = replace(item.job, apply_url=plugin.form_url(item.job.url) if plugin else item.job.url)
         answers = self.store.answers_text()
+        # The person's standing answers, for what Simplify leaves: a file they broke stops here, saying why, before a browser opens.
+        standing = standing_brief(load_standing(self.workspace))
         host = site_of(job.apply_url)
         account = self.store.account(host)
         guidance = _guidance(plugin, always_plugins(self.plugins))
@@ -318,8 +322,8 @@ class Session:
             cv_file = self._own_cv()
             outcome = await apply_to_job(
                 self.client, self.config.model, job, cv, answers, cv_file, self.config.data_dir, self.config.browser_profile, guidance, account,
-                # Named only when on: an application without the add-on is the call it always was.
-                **({"simplify": True} if self.config.simplify else {}))
+                # Named only when there: an application without the add-on or a file of answers is the call it always was.
+                **({"simplify": True} if self.config.simplify else {}), **({"standing": standing} if standing else {}))
         except Exception as error:
             # One job's failure is reported and recorded; the next job still runs.
             if refused(error):
@@ -349,6 +353,8 @@ class Session:
             self.store.set_account(host, email)
         self.store.set_status(item.job.id, outcome.status, outcome.summary, outcome.reason)
         self.store.set_proof(item.job.id, outcome.proof)
+        # What the model answered itself, for the person to make standing answers: a trial's questions count too.
+        self.store.note_asked(item.job, outcome.asked)
         await SPEND.settle(self.client)
         cost, used = SPEND.since(mark)
         self.store.set_cost(item.job.id, cost)
