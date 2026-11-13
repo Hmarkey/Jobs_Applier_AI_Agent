@@ -759,9 +759,17 @@ SIMPLIFY_BUTTONS = (
     " if (node.shadowRoot) { roots.push(node.shadowRoot); if (String(node.className).includes('simplify')) panel = true; }"
     " const found = {}; for (const root of roots.slice(1)) for (const id of ['fill-button', 'account-fill-button', 'account-submit-button']) {"
     " const button = root.getElementById ? root.getElementById(id) : root.querySelector('#' + id);"
-    " if (button) found[id] = (button.innerText || button.textContent || '').trim().replace(/\\s+/g, ' '); }"
+    " if (button) found[id] = (button.innerText || button.textContent || '').trim().replace(/\\s+/g, ' ')"
+    " + (button.disabled || button.getAttribute('aria-disabled') === 'true' ? ' [disabled]' : ''); }"
     " return panel || Object.keys(found).length ? found : null; })()"
 )
+# Whether the page's account form holds a password in every password field, as the add-on fills it: then its "Create Account"
+# can send it. Read without the value.
+PASSWORDS_FILLED = (
+    "(() => { const fields = [...document.querySelectorAll('input[type=password]')];"
+    " return fields.length > 0 && fields.every(field => (field.value || '').length > 0); })()"
+)
+DISABLED = " [disabled]"
 # Where the browser is, as far as telling that a page moved on: the address and the page's headings.
 PAGE_MARK = "(() => location.href + ' | ' + [...document.querySelectorAll('h1, h2, h3')].map(node => node.innerText.trim()).join(' / '))()"
 NO_PANEL = "There is no Simplify panel on this page: do it yourself, by the general rules."
@@ -875,17 +883,21 @@ async def simplify_act(session: Browser) -> tuple[str, bool]:
     account = buttons.get("account-fill-button")
     if isinstance(account, str) or "account-submit-button" in buttons:
         signing = "sign in" in (account or "").lower()
-        if "account-submit-button" not in buttons:
+        # The upper button first, always: it fills the form, and the lower one ("Create Account", "Sign In") only sends what is
+        # there. Some sites show both from the start, and a press of the lower one alone, on an empty form, does nothing.
+        if isinstance(account, str):
             clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_ACCOUNT})
             if clicked.isError:
                 return f"Simplify's account button did not take the click: {tool_text(clicked)[:200]}. Do the account yourself.", False
-            for _ in range(int(SIMPLIFY_ACCOUNT_S / SIMPLIFY_POLL_S)):
-                await asyncio.sleep(SIMPLIFY_POLL_S)
-                if "account-submit-button" in ((await _read(session, SIMPLIFY_BUTTONS)) or {}):
-                    break
-            else:
-                return ("Simplify filled the account form with the candidate's email and a password it keeps, and offered no button "
-                        "to send it: press the page's own Create Account or Sign In button."), False
+        # Then the lower one, once it is there and can be pressed and the form holds the password.
+        for _ in range(int(SIMPLIFY_ACCOUNT_S / SIMPLIFY_POLL_S)):
+            await asyncio.sleep(SIMPLIFY_POLL_S)
+            send = ((await _read(session, SIMPLIFY_BUTTONS)) or {}).get("account-submit-button")
+            if isinstance(send, str) and not send.endswith(DISABLED) and await _read(session, PASSWORDS_FILLED) is True:
+                break
+        else:
+            return ("Simplify filled the account form with the candidate's email and a password it keeps, but its own button to "
+                    "send it was not ready: read the form, and press the page's own Create Account or Sign In button."), False
         mark = await _read(session, PAGE_MARK)
         clicked = await session.call_tool("browser_click", {"selector": SIMPLIFY_ACCOUNT_SEND})
         if clicked.isError or not await _moved(session, mark):

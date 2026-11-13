@@ -17,6 +17,7 @@ from aihawk.apply import (
     FILLED,
     NO_PANEL,
     PAGE_MARK,
+    PASSWORDS_FILLED,
     SIMPLIFY_ACCOUNT,
     SIMPLIFY_ACCOUNT_SEND,
     SIMPLIFY_BUTTON,
@@ -61,13 +62,16 @@ def quick(monkeypatch: pytest.MonkeyPatch) -> None:
 class Panel(ScriptedBrowser):
     """A page with Simplify's panel. `stages` says what its buttons are, poll by poll (the last one stays), after each press
     of one of its buttons: stage 0 before any, stage 1 after the first, and so on. A press of the account's "Create Account"
-    moves the page on, unless `moves` is false. How many fields hold something is read from `filled`, poll by poll."""
+    moves the page on, unless `moves` is false. How many fields hold something is read from `filled`, poll by poll. The account
+    form's passwords hold something once "Create Account & Autofill" was pressed, or from the start with `passwords`."""
 
-    def __init__(self, stages: list[list[Any]], filled: list[int] | None = None, click_fails: bool = False, moves: bool = True) -> None:
+    def __init__(self, stages: list[list[Any]], filled: list[int] | None = None, click_fails: bool = False, moves: bool = True,
+                 passwords: bool = False) -> None:
         super().__init__({"#send": SUBMIT})
         self.stages = [list(stage) for stage in stages]
         self.filled, self.click_fails, self.moves = list(filled or [0]), click_fails, moves
         self.pressed = self.sent = 0
+        self.passwords = passwords
 
     @staticmethod
     def _next(values: list[Any]) -> Any:
@@ -79,8 +83,10 @@ class Panel(ScriptedBrowser):
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> SimpleNamespace:
         arguments = arguments or {}
         expression = arguments.get("expression")
-        if name == "browser_evaluate" and expression in (SIMPLIFY_BUTTONS, FILLED, PAGE_MARK):
+        if name == "browser_evaluate" and expression in (SIMPLIFY_BUTTONS, FILLED, PAGE_MARK, PASSWORDS_FILLED):
             self.calls.append((name, arguments))
+            if expression == PASSWORDS_FILLED:
+                return self._answer(self.passwords)
             if expression == SIMPLIFY_BUTTONS:
                 return self._answer(self._next(self.stages[min(self.pressed, len(self.stages) - 1)]))
             if expression == FILLED:
@@ -92,6 +98,7 @@ class Panel(ScriptedBrowser):
                 return SimpleNamespace(isError=True, content=[SimpleNamespace(text="not actionable in 5000ms")])
             self.pressed += 1
             self.sent += arguments["selector"] == SIMPLIFY_ACCOUNT_SEND
+            self.passwords = self.passwords or arguments["selector"] == SIMPLIFY_ACCOUNT
             return self._answer("clicked")
         return await super().call_tool(name, arguments)
 
@@ -153,14 +160,37 @@ def test_an_account_form_the_add_on_offers_no_send_for_is_left_to_the_page_s_but
     assert not made and "press the page's own Create Account" in words
 
 
+def test_both_account_buttons_shown_at_once_the_upper_one_is_pressed_first() -> None:
+    # Seen on some sites: "Create Account & Autofill" and "Create Account" both there from the start. The lower one alone, on
+    # an empty form, does nothing, so the upper one fills the form first.
+    browser = Panel([[ACCOUNT_READY], [ACCOUNT_READY], [FILLING, FILLED_ONCE]])
+    words, made = act(browser)
+    assert browser.clicks() == [SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND]
+    assert made and "created the candidate's account" in words
+
+
+def test_the_lower_button_is_waited_for_until_it_can_be_pressed() -> None:
+    blocked = {**ACCOUNT, "account-submit-button": "Create Account [disabled]"}
+    browser = Panel([[blocked], [blocked, blocked, ACCOUNT_READY], [FILLED_ONCE]])
+    _, made = act(browser)
+    assert browser.clicks() == [SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND] and made
+
+
+def test_a_lower_button_that_never_becomes_ready_is_not_pressed() -> None:
+    blocked = {**ACCOUNT, "account-submit-button": "Create Account [disabled]"}
+    browser = Panel([[blocked], [blocked]])
+    words, made = act(browser)
+    assert browser.clicks() == [SIMPLIFY_ACCOUNT] and not made and "was not ready" in words
+
+
 def test_with_simplify_on_the_model_has_the_rules_and_the_tool_and_an_account_it_makes_is_kept(tmp_path: Path) -> None:
     # The first page: a panel with none of the buttons this needs (Workday's start page). Then the model presses simplify_fill
     # on the account page, where the add-on's "Create Account" is already offered.
-    browser = Panel([[{}, ACCOUNT_READY], [FILLING, FILLED_ONCE]])
+    browser = Panel([[{}, ACCOUNT_READY], [ACCOUNT_READY], [FILLING, FILLED_ONCE]])
     model = ScriptedModel([tool_call("simplify_fill")], ready(), VERIFIED)
     outcome = asyncio.run(run_on_page(browser, [], model, "m", JOB, "cv", "answers", Path("cv.pdf"), tmp_path / "proof.png", simplify=True))  # type: ignore[arg-type]
     assert outcome.status == "submitted" and outcome.made_account
-    assert browser.clicks() == [SIMPLIFY_ACCOUNT_SEND, "#send"]
+    assert browser.clicks() == [SIMPLIFY_ACCOUNT, SIMPLIFY_ACCOUNT_SEND, "#send"]
     request = model.requests[0]
     assert SIMPLIFY_RULES in request["messages"][1]["content"] and NO_PANEL in request["messages"][1]["content"]
     assert "simplify_fill" in [tool["function"]["name"] for tool in request["tools"]]
