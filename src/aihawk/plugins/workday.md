@@ -13,7 +13,7 @@ Sign in or create the account by hand. The step "Create Account/Sign In" shows `
 
 Both forms carry a hidden text field `beecatcher` (name `website`, "This input is for robots only"): never type in it.
 
-A code sent by email. After "Create Account", or at sign-in, the site may ask to verify the email address with a code it sent. Workday's messages are expected from an address at `myworkday.com`, often `<company>@myworkday.com`, though no real Workday mail has been read: read it as the mail instructions say, then come back to the form's address, read the page again and type the code where it asks.
+A code sent by email. After "Create Account", or at sign-in, the site may ask to verify the email address with a code it sent. Workday's messages are expected from an address at `myworkday.com`, often `<company>@myworkday.com`, though no real Workday mail has been read: read it as the mail instructions say, taking only a message that arrived after the site sent it, never an older one, then come back to the form's address, read the page again and type the code where it asks.
 
 If sign-in fails soon after the account was made, or the site says the email is not verified yet, the account waits for its email: confirm it from the mailbox first, as the rule on new accounts says, and sign in once more. If sign-in with the account_password fails and the site says the account already exists, call finish_form with status blocked and say the account needs a password the answers do not hold. Do not try another password: Workday locks an account after a few attempts, and that account is the person's only way back to this company.
 

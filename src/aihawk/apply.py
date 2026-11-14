@@ -459,7 +459,7 @@ class _Watch:
     def __init__(self) -> None:
         self.calls: list[_Call] = []
         self.idle = self.turns = self.visits = 0
-        self.warned = self.in_mailbox = False
+        self.warned = self.in_mailbox = self.arrived = False
 
     def talked(self) -> str:
         """A reply with no tool call; why the run ends, or ""."""
@@ -473,7 +473,7 @@ class _Watch:
     def one_visit_too_many(self, url: str) -> bool:
         """An address opened; True when it is an arrival at the mailbox beyond the plugins' two."""
         at_mailbox = _is_mailbox(url)
-        arrives = at_mailbox and not self.in_mailbox
+        arrives = self.arrived = at_mailbox and not self.in_mailbox
         self.in_mailbox = at_mailbox
         if arrives:
             self.visits += 1
@@ -600,7 +600,11 @@ async def fill_form(
                 return _blocked(MAIL_NOT_SIGNED_IN, MAILBOX_SIGNED_OUT, watch.turns)
             pictures = _images(result)
             seen += pictures
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": tool_text(result) or "Done: what it shows comes next."})
+            said = tool_text(result) or "Done: what it shows comes next."
+            if name == "browser_navigate" and watch.arrived:
+                # The mailbox may still hold the site's code from an earlier try, which no longer works: only a new one counts.
+                said = f"{said}\n\n{mailbox_note(await _read(session, MAILBOX_CLOCK))}"
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": said})
             watch.saw(name, arguments, tool_text(result), "".join(part["image_url"]["url"] for part in pictures))
         _trim_readings(messages)
         why, warning = await watch.after(client, model)
@@ -1180,7 +1184,8 @@ async def run_on_page(
             more = (
                 f"{brief}\n\nYou filled this form and clicked send. The page now asks for a code it sent before it takes the "
                 f"application: {sent.code}\nRead the code from the candidate's mailbox, as the mailbox instructions say (it can take a "
-                "minute or two to arrive: the newest message from this site or its form's provider), come back to the form's address, "
+                "minute or two to arrive: the newest message from this site or its form's provider, sent after this send; an older one "
+                "is from an earlier try and never used), come back to the form's address, "
                 "and type it where the page asks, keeping everything else as it is. Then call finish_form with status ready and the "
                 "control that sends the form with the code. A code that never comes ends the form as blocked, saying so."
             )
@@ -1359,6 +1364,21 @@ def _account_line(job: Job, account: tuple[str, str] | None, simplify: bool = Fa
         return (f"Your account on {site}: made on {made_at[:10]} with {email}. On the sign-in page call simplify_fill first; if "
                 "Simplify cannot sign in, try the account_password from the answers once.")
     return f"Your account on {site}: made on {made_at[:10]} with {email}, and the account_password from the answers."
+
+
+# The time on the mailbox's own clock, as its messages show their times.
+MAILBOX_CLOCK = "new Date().toString()"
+
+
+def mailbox_note(clock: object) -> str:
+    """What the model is told as it arrives at the mailbox: the time there, and that a message from before this try is not
+    the one it came for."""
+    now = f"Its clock says {clock}. " if isinstance(clock, str) and clock else ""
+    return (f"You are in the mailbox. {now}The code or link you came for was sent by the site only a moment ago, for this "
+            "try: only a message from the site that arrived after the site sent it counts, the newest of them. One that "
+            "arrived before (more than a few minutes before now) is from an earlier try and its code no longer works: never "
+            "use it, even when it is the only one. When nothing newer is there yet, wait and look again, as the mailbox "
+            "instructions say.")
 
 
 def _is_mailbox(url: str) -> bool:

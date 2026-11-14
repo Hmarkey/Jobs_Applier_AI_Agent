@@ -1115,3 +1115,47 @@ def test_a_click_on_anything_else_goes_through() -> None:
     model = ScriptedModel([tool_call("browser_click", selector="#signin")], [tool_call("finish_form", status="blocked", summary="x", submit_selector="")])
     asyncio.run(fill_form(browser, [], model, "m", "brief"))  # type: ignore[arg-type]
     assert browser.clicks() == ["#signin"]
+
+
+# ---------- only the code sent for this try ----------
+
+
+class ClockedBrowser(ScriptedBrowser):
+    """A browser whose clock reads one time."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> SimpleNamespace:
+        if name == "browser_evaluate" and (arguments or {}).get("expression") == apply_module.MAILBOX_CLOCK:
+            self.calls.append((name, arguments))
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text=json.dumps("Fri Nov 13 2026 14:05:00 GMT-0500"))])
+        return await super().call_tool(name, arguments)
+
+
+def test_arriving_at_the_mailbox_says_its_time_and_that_an_older_code_is_never_used() -> None:
+    browser = ClockedBrowser({"#send": SUBMIT}, page={"url": "https://u/apply", "text": "the form"})
+    model = ScriptedModel(
+        go("https://mail.google.com/mail/u/0/#search/from%3Agreenhouse"),
+        go("https://mail.google.com/mail/u/0/#inbox"),
+        go("https://u/apply"),
+        go("https://mail.google.com/mail/u/0/#search/from%3Agreenhouse"),
+        ready(),
+    )
+    report = asyncio.run(fill_form(browser, [], model, "m", "the brief"))  # type: ignore[arg-type]
+    assert report.status == "ready"
+    told = [m["content"] for m in model.requests[-1]["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
+    # Each arrival is told, a page inside the mailbox and the form are not.
+    noted = [said for said in told if "earlier try" in said]
+    assert len(noted) == 2 and all("Fri Nov 13 2026 14:05:00" in said and "never use it" in said for said in noted)
+    assert "earlier try" not in told[1] and "earlier try" not in told[2]
+
+
+def test_the_mailbox_note_without_a_clock_still_says_only_a_new_message_counts() -> None:
+    note = apply_module.mailbox_note(None)
+    assert "clock" not in note and "only a message from the site that arrived after the site sent it counts" in note
+
+
+@pytest.mark.parametrize("name", ["gmail", "outlook"])
+def test_the_mailbox_rules_take_only_the_newest_code_sent_for_this_try(name: str) -> None:
+    text = " ".join((Path(apply_module.__file__).parent / "plugins" / f"{name}.md").read_text(encoding="utf-8").split())
+    assert "Before you leave the form for the mailbox, read `new Date()`" in text
+    assert "never use it, even when it is the only one" in text and "take the newest" in text
+    assert "ask the site to send a new code at most once" in text
