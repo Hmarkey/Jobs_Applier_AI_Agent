@@ -453,7 +453,7 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   </section>
 
   <section class="card">
-    <div class="card-head records-head"><div><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态；勾选后可以删除；「未发出」和「已发送，未确认」的可以放回找到的职位重新申请</p></div><div class="head-actions"><button class="btn" id="rec-back" type="button" hidden>放回职位列表</button><button class="btn danger" id="rec-delete" type="button" hidden>删除所选</button></div></div>
+    <div class="card-head records-head"><div><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态；勾选后可以删除；「未发出」和「已发送，未确认」的可以放回找到的职位重新申请</p></div><div class="head-actions"><span class="muted" id="rec-copied" aria-live="polite"></span><button class="btn" id="rec-copy" type="button" title="复制所有确认发出的申请（编号、公司、职位、日期和链接），到 Google Doc 里按 Ctrl+V 粘贴">复制已申请列表</button><button class="btn" id="rec-back" type="button" hidden>放回职位列表</button><button class="btn danger" id="rec-delete" type="button" hidden>删除所选</button></div></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th class="pick"><input type="checkbox" id="rec-all" aria-label="选中当前显示的全部记录" title="选中当前显示的记录"></th><th>日期</th><th>公司</th><th>职位</th><th>网站</th><th>AIHawk 结果</th><th>跟进状态</th><th>匹配分</th><th>下一步</th></tr></thead>
@@ -872,6 +872,46 @@ async function putBack(ids, button) {
   } finally {
     if (button) button.disabled = false;
   }
+}
+
+// ---------- the applications sent, copied for a document ----------
+// Copied as HTML, so that Google Docs keeps the numbers and the links, and as plain text for anywhere else.
+async function copyApplied(button) {
+  const said = document.getElementById("rec-copied");
+  button.disabled = true;
+  try {
+    const response = await apiFetch("/api/applied/export", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || response.status);
+    if (!body.count) { said.textContent = "还没有确认发出的申请"; return; }
+    await toClipboard(body.html, body.text);
+    said.textContent = `已复制 ${body.count} 条：打开 Google Doc 按 Ctrl+V 粘贴`;
+  } catch (error) {
+    said.textContent = `没有复制：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+async function toClipboard(html, text) {
+  if (navigator.clipboard && window.ClipboardItem) {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([text], { type: "text/plain" }) })]);
+      return;
+    } catch { /* a browser that refuses it: the older way below */ }
+  }
+  const box = el("div", { contenteditable: "true", style: "position: fixed; left: -9999px; top: 0;" });
+  box.innerHTML = html;
+  document.body.append(box);
+  const range = document.createRange();
+  range.selectNodeContents(box);
+  const selection = getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  const copied = document.execCommand("copy");
+  selection.removeAllRanges();
+  box.remove();
+  if (!copied) throw new Error("浏览器不允许写入剪贴板");
 }
 
 // ---------- detail drawer ----------
@@ -1908,6 +1948,7 @@ async function startSearch(path) {
 document.getElementById("search").addEventListener("input", e => { state.search = e.target.value; renderChips(); renderTable(); });
 document.getElementById("rec-delete").addEventListener("click", () => deleteRecords([...state.picked]));
 document.getElementById("rec-back").addEventListener("click", e => putBack([...state.picked], e.currentTarget));
+document.getElementById("rec-copy").addEventListener("click", e => copyApplied(e.currentTarget));
 document.getElementById("rec-all").addEventListener("change", e => {
   for (const item of filtered()) { if (e.target.checked) state.picked.add(item.id); else state.picked.delete(item.id); }
   renderTable();

@@ -337,6 +337,46 @@ def test_the_jobs_found_are_those_posted_within_the_days_the_settings_say_now(se
     assert back["score"] == 4.0
 
 
+def test_the_applications_sent_are_listed_oldest_first_for_a_document(home: Path) -> None:
+    store = Store(home / "data" / "jobs.db")
+    store.add(Job("https://jobs.example.com/odd", "R&D <Labs>", "ML Engineer", "Remote", "javascript:alert(1)", "u", ""))
+    for name, status, at in (("high", "submitted", "2026-11-12T15:00:00+00:00"), ("low", "unconfirmed", "2026-11-09T10:00:00+00:00"),
+                             ("other", "blocked", "2026-11-08T10:00:00+00:00"), ("https://jobs.example.com/odd", "submitted", "2026-11-11T10:00:00+00:00")):
+        job_id = name if name.startswith("http") else job(name).id
+        store.set_status(job_id, status)
+        store.set_proof(job_id, Proof(at=at))
+    store.close()
+    data = dashboard.Data(home)
+    # "sent" was submitted when the store was made, with no time of its own: it is dated by its last change.
+    data.delete([job("sent").id])
+    data.mark_manual(job("unscored").id)
+    listed = data.applied_list()
+    assert listed["count"] == 3
+    lines = listed["text"].splitlines()
+    day = dashboard._local_day("2026-11-12T15:00:00+00:00")
+    assert lines[0] == f"1. R&D <Labs>, ML Engineer,  {dashboard._local_day('2026-11-11T10:00:00+00:00')}"
+    # The odd one has no link to keep: not one that runs a script.
+    assert "javascript" not in listed["text"] and "javascript" not in listed["html"]
+    assert lines[1] == f"2. high Inc, high engineer,  {day}" and lines[2] == f"   {job('high').url}"
+    assert lines[3].startswith("3. unscored Inc, unscored engineer,  ") and lines[4] == f"   {job('unscored').url}"
+    assert len(lines) == 5
+    assert listed["html"].startswith("<ol><li><p>R&amp;D &lt;Labs&gt;, ML Engineer, &nbsp;")
+    assert f'<br><a href="{job("high").url}">{job("high").url}</a></p></li>' in listed["html"]
+    assert listed["html"].count("<li>") == 3 and listed["html"].endswith("</ol>")
+
+
+def test_a_time_that_is_not_one_is_shown_as_it_is() -> None:
+    assert dashboard._local_day("not a time") == "not a time"
+    assert dashboard._local_day("2026-11-10T09:00:00") == "2026-11-10"
+
+
+def test_the_page_gives_each_person_their_own_list_to_copy(server: Any) -> None:
+    status, body = call(server.at("/api/applied/export"))
+    assert status == 200 and body["count"] == 1 and job("sent").url in body["text"]
+    call(f"{server.base}/api/users", {"name": "小王"})
+    assert call(server.at("/api/applied/export", user="user"))[1] == {"count": 0, "html": "", "text": ""}
+
+
 def test_a_record_not_sent_goes_back_among_the_jobs_found_as_it_was(home: Path) -> None:
     store = Store(home / "data" / "jobs.db")
     store.set_status(job("high").id, "blocked", "a login wall", "login")

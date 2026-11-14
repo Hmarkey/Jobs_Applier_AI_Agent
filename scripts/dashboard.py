@@ -16,6 +16,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -163,6 +164,15 @@ FOUND = {
 }
 # The most applications one batch from the page sends: each takes minutes, and a long batch is better started again.
 BATCH = 50
+
+
+def _local_day(when: str) -> str:
+    """The day, on this computer's clock, of a time AIHawk kept in UTC; the text as it is when it is not a time."""
+    try:
+        moment = datetime.fromisoformat(when)
+    except (TypeError, ValueError):
+        return (when or "")[:10]
+    return (moment if moment.tzinfo is None else moment.astimezone()).date().isoformat()
 
 
 class Data:
@@ -428,6 +438,20 @@ class Data:
         with self._tracking() as db:
             db.execute("DELETE FROM tracking WHERE job_id = ?", (job_id,))
             db.commit()
+
+    def applied_list(self) -> dict[str, Any]:
+        """The applications the page confirmed, and those made by hand, the oldest first and numbered, as a list to paste into
+        a document: HTML that keeps the numbers and the links (Google Docs reads it so), and plain text for anywhere else.
+        Each is "company, role,  date" with its link below it."""
+        items = sorted((item for item in self.items() if item["result"] == "submitted"), key=lambda item: item["when"] or "")
+        rows, lines = [], []
+        for number, item in enumerate(items, 1):
+            head = f"{item['company']}, {item['title']},  {_local_day(item['when'])}"
+            link = next((url for url in (item["url"], item["final_url"]) if urlsplit(url or "").scheme in ("http", "https")), "")
+            shown = html.escape(link)
+            rows.append(f"<li><p>{html.escape(head).replace('  ', ' &nbsp;')}" + (f'<br><a href="{shown}">{shown}</a>' if link else "") + "</p></li>")
+            lines.append(f"{number}. {head}" + (f"\n   {link}" if link else ""))
+        return {"count": len(items), "html": f"<ol>{''.join(rows)}</ol>" if rows else "", "text": "\n".join(lines)}
 
     def put_back(self, job_ids: object) -> int:
         """These records of jobs AIHawk did not send, or sent without the page confirming it, back among the jobs found as
@@ -1531,6 +1555,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                     return self._send(HTTPStatus.OK, picture.read_bytes(), "image/png") if picture else self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
                 if path == "/api/found":
                     return self._json({"items": data.found(), "dry_run": dry_run(), "blocked": sender.blocked(), "batch": BATCH})
+                if path == "/api/applied/export":
+                    return self._json(data.applied_list())
                 if path == "/api/found/job":
                     found = data.found_details(self._job_id())
                     return self._json(found) if found is not None else self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
