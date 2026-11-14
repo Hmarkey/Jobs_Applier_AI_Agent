@@ -22,6 +22,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -460,6 +461,8 @@ class _Watch:
         self.calls: list[_Call] = []
         self.idle = self.turns = self.visits = 0
         self.warned = self.in_mailbox = self.arrived = False
+        # The form's address while the mailbox is open in a tab beside it; "" when it is not.
+        self.form_url = ""
 
     def talked(self) -> str:
         """A reply with no tool call; why the run ends, or ""."""
@@ -564,6 +567,10 @@ async def fill_form(
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": "Those arguments are not valid JSON."})
                 continue
             if name == "finish_form":
+                if watch.form_url:
+                    # The form is what is sent and read after: the mailbox's tab, left open, is closed first.
+                    await _close_mail_tab(session)
+                    watch.form_url = ""
                 if arguments.get("status") == "ready" and (doubt := await _not_one(session, str(arguments.get("submit_selector", "")))):
                     messages.append({"role": "tool", "tool_call_id": call.id, "content": doubt})
                     watch.saw(name, arguments, doubt)
@@ -594,7 +601,7 @@ async def fill_form(
             # The plugins say two visits to the mailbox; the code holds the model to it, whatever it reasons.
             if name == "browser_navigate" and watch.one_visit_too_many(str(arguments.get("url", ""))):
                 return _blocked(NO_CODE, NO_CODE_REASON, watch.turns)
-            result = await session.call_tool(name, arguments)
+            result = await _navigate(session, watch, str(arguments.get("url", ""))) if name == "browser_navigate" else await session.call_tool(name, arguments)
             if name == "browser_navigate" and watch.in_mailbox and not _is_mailbox(await _address_now(session)):
                 # The mailbox sent the browser to its sign-in page: that is the person's to do, once.
                 return _blocked(MAIL_NOT_SIGNED_IN, MAILBOX_SIGNED_OUT, watch.turns)
@@ -1364,6 +1371,82 @@ def _account_line(job: Job, account: tuple[str, str] | None, simplify: bool = Fa
         return (f"Your account on {site}: made on {made_at[:10]} with {email}. On the sign-in page call simplify_fill first; if "
                 "Simplify cannot sign in, try the account_password from the answers once.")
     return f"Your account on {site}: made on {made_at[:10]} with {email}, and the account_password from the answers."
+
+
+# The mailbox is read in a tab of its own, beside the form. A form that waits for a code may keep that wait only in the page
+# (Oracle's "You're almost done" after the send, 2026-11-13): going to the mailbox and back in the one page reloaded it, and it
+# sent a new code, so the one just read no longer worked. The browser's tools drive the newest page, and a page's own script
+# may not open one: the tab is opened by a real click on a link put on the form for it, and closed to come back.
+MAIL_LINK = "aihawk-mailbox"
+_OPEN_MAIL_LINK = (
+    "((href) => { document.querySelectorAll('#" + MAIL_LINK + "').forEach(old => old.remove());"
+    " const a = document.createElement('a'); a.id = '" + MAIL_LINK + "'; a.href = href; a.target = '_blank'; a.rel = 'noopener';"
+    " a.textContent = 'mailbox'; a.style.cssText = 'position:fixed;top:0;left:0;z-index:2147483647;background:#fff;padding:2px';"
+    " a.addEventListener('click', () => setTimeout(() => a.remove(), 0)); document.body.append(a); return true; })"
+)
+CLOSE_TAB = "(() => { window.close(); return true; })()"
+TAB_WAIT_S = 15
+BACK_ON_FORM = ("Back on the form, in its own tab: it was not reloaded, and what it showed and held is as you left it. Read it, "
+                "then type the code where it asks.")
+
+
+def mail_tab_note(form: str) -> str:
+    """What the model is told when the mailbox opens beside the form."""
+    return (f"The mailbox opened in a tab of its own, beside the form, which stays exactly as it is. Move about the mailbox as you "
+            f"need. To come back, call browser_navigate with the form's address, {form}: this tab closes and you are on the form as "
+            "you left it, not reloaded. Never reload the form, open it again or ask the site for a new code to get back to it.")
+
+
+def _said(words: str) -> Any:
+    """A tool's answer, as the server gives one, for a step this module took itself."""
+    return SimpleNamespace(isError=False, content=[SimpleNamespace(type="text", text=words)])
+
+
+def _same_page(one: str, other: str) -> bool:
+    return one.split("#")[0].rstrip("/") == other.split("#")[0].rstrip("/")
+
+
+async def _until_moved(session: Browser, away_from: str) -> str:
+    """The address of the page the tools drive once it is another than `away_from`; "" when it stays."""
+    deadline = time.monotonic() + TAB_WAIT_S
+    while time.monotonic() < deadline:
+        now = await _address_now(session)
+        if now and now != "about:blank" and not _same_page(now, away_from):
+            return now
+        await asyncio.sleep(0.5)
+    return ""
+
+
+async def _open_mail_tab(session: Browser, url: str) -> str:
+    """The mailbox opened at `url` in a tab beside the form: the form's address, or "" when no tab opened (the mailbox is
+    then opened in the form's own page, as before)."""
+    form = await _address_now(session)
+    if not form or form == "about:blank" or await _read(session, f"{_OPEN_MAIL_LINK}({json.dumps(url)})") is not True:
+        return ""
+    if (await session.call_tool("browser_click", {"selector": f"#{MAIL_LINK}"})).isError:
+        return ""
+    return form if await _until_moved(session, form) else ""
+
+
+async def _close_mail_tab(session: Browser) -> bool:
+    """The mailbox's tab closed: whether the page the tools drive is another one now, the form's."""
+    tab = await _address_now(session)
+    with suppress(Exception):
+        # The tab is gone before it can answer: an error here is the close itself.
+        await session.call_tool("browser_evaluate", {"expression": CLOSE_TAB})
+    return bool(await _until_moved(session, tab))
+
+
+async def _navigate(session: Browser, watch: _Watch, url: str) -> Any:
+    """browser_navigate, with the mailbox in a tab of its own: opened beside the form on arriving at it, closed when the
+    model goes back to the form's address, so the form is never reloaded for a code."""
+    if watch.arrived and not watch.form_url and (form := await _open_mail_tab(session, url)):
+        watch.form_url = form
+        return _said(mail_tab_note(form))
+    if watch.form_url and not _is_mailbox(url) and _same_page(url, watch.form_url) and await _close_mail_tab(session):
+        watch.form_url = ""
+        return _said(BACK_ON_FORM)
+    return await session.call_tool("browser_navigate", {"url": url})
 
 
 # The time on the mailbox's own clock, as its messages show their times.

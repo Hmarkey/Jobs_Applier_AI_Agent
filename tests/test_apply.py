@@ -1159,3 +1159,85 @@ def test_the_mailbox_rules_take_only_the_newest_code_sent_for_this_try(name: str
     assert "Before you leave the form for the mailbox, read `new Date()`" in text
     assert "never use it, even when it is the only one" in text and "take the newest" in text
     assert "ask the site to send a new code at most once" in text
+
+
+# ---------- the mailbox in a tab of its own, beside the form ----------
+
+
+class TabbedBrowser(ScriptedBrowser):
+    """A browser that opens the mailbox link in a tab of its own and closes a tab when asked: the form behind keeps its page."""
+
+    def __init__(self) -> None:
+        super().__init__({"#send": SUBMIT}, page={"url": "https://u/apply", "text": "You're almost done: type the code we sent"})
+        self.behind: list[dict[str, str]] = []
+        self.link = ""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        arguments = arguments or {}
+        expression = str(arguments.get("expression", ""))
+        if name == "browser_evaluate" and "createElement" in expression and apply_module.MAIL_LINK in expression:
+            self.calls.append((name, arguments))
+            self.link = json.loads(expression.rsplit("})(", 1)[1][:-1])
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="true")])
+        if name == "browser_click" and arguments.get("selector") == f"#{apply_module.MAIL_LINK}":
+            self.calls.append((name, arguments))
+            self.behind.append(self.page)
+            self.page = {"url": self.link, "text": "Your code is 482913"}
+            return SimpleNamespace(isError=False, content=[SimpleNamespace(text="clicked")])
+        if name == "browser_evaluate" and expression == apply_module.CLOSE_TAB and self.behind:
+            self.calls.append((name, arguments))
+            self.page = self.behind.pop()
+            return SimpleNamespace(isError=True, content=[SimpleNamespace(text="the page is disposed")])
+        return await super().call_tool(name, arguments)
+
+    def form_loads(self) -> int:
+        return sum(1 for name, arguments in self.calls if name == "browser_navigate" and arguments["url"].startswith("https://u/"))
+
+
+def told(model: ScriptedModel) -> list[str]:
+    return [m["content"] for m in model.requests[-1]["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
+
+
+def test_the_mailbox_opens_beside_the_form_and_going_back_closes_it_without_reloading_the_form() -> None:
+    browser = TabbedBrowser()
+    model = ScriptedModel(
+        go("https://mail.google.com/mail/u/0/#search/from%3Aoracle"),
+        go("https://mail.google.com/mail/u/0/#inbox"),
+        go("https://u/apply"),
+        ready(),
+    )
+    report = asyncio.run(fill_form(browser, [], model, "m", "the brief"))  # type: ignore[arg-type]
+    assert report.status == "ready" and browser.form_loads() == 0 and browser.page["url"] == "https://u/apply" and not browser.behind
+    said = told(model)
+    assert said[0].startswith(apply_module.mail_tab_note("https://u/apply")) and "earlier try" in said[0]
+    assert "earlier try" not in said[1] and said[2] == apply_module.BACK_ON_FORM
+    # The tab came by one click on the link put on the form for it; the second mailbox page was opened inside it.
+    assert browser.clicks() == [f"#{apply_module.MAIL_LINK}"] and mailbox_pages(browser) == 1
+
+
+def test_a_link_from_the_mail_opens_in_its_tab_and_the_form_is_still_not_reloaded() -> None:
+    browser = TabbedBrowser()
+    model = ScriptedModel(go("https://mail.google.com/mail/u/0/#inbox"), go("https://u/activate?token=1"), go("https://u/apply"), ready())
+    asyncio.run(fill_form(browser, [], model, "m", "the brief"))  # type: ignore[arg-type]
+    # The mailbox came by the click on its link, the confirmation link opened in its tab, and the form was never loaded again.
+    assert [arguments["url"] for name, arguments in browser.calls if name == "browser_navigate"] == ["https://u/activate?token=1"]
+    assert browser.page["url"] == "https://u/apply" and told(model)[2] == apply_module.BACK_ON_FORM
+
+
+def test_a_form_finished_with_the_mailbox_still_open_is_back_in_front_first() -> None:
+    browser = TabbedBrowser()
+    model = ScriptedModel(go("https://mail.google.com/mail/u/0/#inbox"), ready())
+    report = asyncio.run(fill_form(browser, [], model, "m", "the brief"))  # type: ignore[arg-type]
+    assert report.status == "ready" and browser.page["url"] == "https://u/apply" and not browser.behind
+
+
+def test_each_visit_opens_its_own_tab_and_the_third_still_ends_the_form() -> None:
+    browser = TabbedBrowser()
+    model = ScriptedModel(
+        go("https://mail.google.com/mail/u/0/#inbox"), go("https://u/apply"),
+        go("https://mail.google.com/mail/u/0/#inbox"), go("https://u/apply"),
+        go("https://mail.google.com/mail/u/0/#inbox"), ready(),
+    )
+    report = asyncio.run(fill_form(browser, [], model, "m", "the brief"))  # type: ignore[arg-type]
+    assert report.blocked_by == apply_module.NO_CODE_REASON and browser.form_loads() == 0
+    assert browser.clicks().count(f"#{apply_module.MAIL_LINK}") == 2
