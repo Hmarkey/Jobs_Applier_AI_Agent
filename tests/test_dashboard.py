@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,8 @@ import pytest
 
 from aihawk.apply import SUBMITTING, Outcome
 from aihawk.database import Job
-from aihawk.store import Store
+from aihawk.posting import PostingError
+from aihawk.store import Proof, Store
 from fakes import load_script
 
 dashboard = load_script("scripts", "dashboard")
@@ -80,6 +82,15 @@ class FakeSession:
         outcome = self.outcomes.get(item.job.id, Outcome("submitted", "filled", reason=""))
         self.store.set_status(item.job.id, outcome.status, outcome.summary, outcome.reason)
         return outcome
+
+    async def add_link(self, url: str) -> tuple[Any, bool]:
+        """As the real one does, with a page that reads as "Linked Inc", or as no job when its address says nothing."""
+        if (here := self.store.known(url)) is not None:
+            return here, False
+        if "nothing" in url:
+            raise PostingError("这个页面里读不出职位信息")
+        self.store.add(Job(url, "Linked Inc", "Linked engineer", "Remote", url, url, "A posting.", 1.0))
+        return self.store.get(url), True
 
     def close(self) -> None:
         self.closed = True
@@ -290,6 +301,89 @@ def test_a_mark_by_hand_can_be_undone_and_the_job_is_found_again_as_it_was(home:
     assert next(item for item in data.found() if item["id"] == job("unscored").id)["status"] == "new"
 
 
+def test_the_page_adds_a_job_from_its_link_and_says_when_it_is_already_there(server: Any) -> None:
+    url = "https://jobs.example.com/linked"
+    status, body = call(server.at("/api/found/add"), {"url": f"  {url}  "})
+    assert status == 200 and body["new"] and not body["tried"] and (body["id"], body["company"]) == (url, "Linked Inc")
+    assert url in {item["id"] for item in call(server.at("/api/found"))[1]["items"]}
+    status, body = call(server.at("/api/found/add"), {"url": url})
+    assert status == 200 and not body["new"] and not body["tried"]
+    # One already applied to is said, and stays where it is.
+    status, body = call(server.at("/api/found/add"), {"url": job("sent").url})
+    assert status == 200 and body["tried"] and body["status_words"] == "已发送并确认"
+    for bad in ("", None, "https://jobs.example.com/nothing"):
+        status, body = call(server.at("/api/found/add"), {"url": bad})
+        assert status == 400 and body["error"], bad
+
+
+def test_the_jobs_found_are_those_posted_within_the_days_the_settings_say_now(server: Any) -> None:
+    me = server.hub.person("me")
+    store = Store(me.workspace / "data" / "jobs.db")
+    ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).isoformat(timespec="seconds").removesuffix("+00:00")
+    store.set_posted({job("high").url: ten_days_ago, job("low").url: "2001-01-01T00:00:00", job("other").url: ""})
+    store.mark_by_hand(job("low").id)
+    store.close()
+    before = {item["id"] for item in call(server.at("/api/found"))[1]["items"]}
+    me.change({"max_age_days": 3})
+    after = {item["id"] for item in call(server.at("/api/found"))[1]["items"]}
+    # The old one is left out at once; the one added by hand, the undated and the not yet dated stay.
+    assert before - after == {job("high").id} and job("low").id in after and job("other").id in after
+    assert next(person for person in call(f"{server.base}/api/users")[1]["users"] if person["id"] == "me")["found"] == len(after)
+    # One left out cannot be sent.
+    status, _ = call(server.at("/api/apply"), {"ids": [job("high").id]})
+    assert status == 404
+    me.change({"max_age_days": 30})
+    back = next(item for item in call(server.at("/api/found"))[1]["items"] if item["id"] == job("high").id)
+    assert back["score"] == 4.0
+
+
+def test_a_record_not_sent_goes_back_among_the_jobs_found_as_it_was(home: Path) -> None:
+    store = Store(home / "data" / "jobs.db")
+    store.set_status(job("high").id, "blocked", "a login wall", "login")
+    store.set_proof(job("high").id, Proof(at="2026-11-13T10:00:00+00:00", evidence="Sign in to continue"))
+    store.set_status(job("unscored").id, "failed", "the browser died", "other")
+    store.set_status(job("low").id, "unconfirmed", "clicked", "")
+    store.close()
+    data = dashboard.Data(home)
+    data.save(job("high").id, {"notes": "try again"})
+    # What was not sent goes back, and what was clicked without the page confirming it; what the page confirmed stays.
+    assert data.put_back([job("high").id, job("unscored").id, job("low").id, job("sent").id]) == 3
+    found = {item["id"]: item for item in data.found()}
+    assert found[job("high").id]["status"] == "scored" and found[job("high").id]["score"] == 4.0
+    assert found[job("unscored").id]["status"] == "new" and found[job("low").id]["status"] == "scored"
+    records = {item["id"] for item in data.items()}
+    assert records == {job("sent").id}
+    # Tried again from nothing: no proof, no tracking of the old try.
+    store = Store(home / "data" / "jobs.db")
+    store.set_status(job("high").id, "blocked", "again", "closed")
+    store.close()
+    again = next(item for item in data.items() if item["id"] == job("high").id)
+    assert again["notes"] == "" and again["evidence"] == "" and again["reason"] == "closed"
+
+
+@pytest.mark.parametrize("ids", [None, [], "x", [1], [""]])
+def test_putting_back_needs_a_list_of_records(home: Path, ids: Any) -> None:
+    with pytest.raises(ValueError):
+        dashboard.Data(home).put_back(ids)
+
+
+def test_a_record_the_page_confirmed_never_goes_back(home: Path) -> None:
+    with pytest.raises(LookupError, match="不能放回"):
+        dashboard.Data(home).put_back([job("sent").id, "nothing-like-it"])
+    assert job("sent").id not in {item["id"] for item in dashboard.Data(home).found()}
+
+
+def test_the_page_puts_a_record_not_sent_back(server: Any) -> None:
+    store = Store(server.hub.person("me").workspace / "data" / "jobs.db")
+    store.set_status(job("other").id, "refused", "the form refused it", "refused_by_form")
+    store.close()
+    status, body = call(server.at("/api/job/back"), {"ids": [job("other").id]})
+    assert status == 200 and body == {"back": 1}
+    assert job("other").id in {item["id"] for item in call(server.at("/api/found"))[1]["items"]}
+    status, body = call(server.at("/api/job/back"), {"ids": [job("other").id]})
+    assert status == 404 and "刷新" in body["error"]
+
+
 def test_only_a_mark_by_hand_can_be_undone(home: Path) -> None:
     with pytest.raises(LookupError):
         dashboard.Data(home).undo_manual(job("sent").id)
@@ -324,7 +418,8 @@ async def accept_any_key(key: str) -> str:
 def server(home: Path) -> Any:
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), lambda *args: None)  # type: ignore[arg-type]
     port = httpd.server_address[1]
-    hub = dashboard.Hub(home.parent / "everyone", legacy=home, session=FakeSession, key_check=accept_any_key)
+    # Its own place for the people, beside nothing another test made: the base folder of the temporary ones is shared.
+    hub = dashboard.Hub(home / "everyone", legacy=home, session=FakeSession, key_check=accept_any_key)
     httpd.RequestHandlerClass = dashboard.handler(hub, port)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{port}"

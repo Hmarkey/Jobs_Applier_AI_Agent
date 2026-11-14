@@ -211,6 +211,8 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn.danger { border-color: var(--critical); color: var(--critical); }
 .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--critical) 10%, transparent); }
+.link-box { margin-bottom: 12px; }
+.link-box .row input { flex: 1 1 240px; min-width: 0; border: 1px solid var(--border); background: var(--page); color: var(--text); border-radius: 8px; padding: 6px 8px; }
 .records-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .head-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; flex: none; }
 .notice.good { border-left-color: var(--series-3); }
@@ -307,7 +309,7 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
         <p class="status" id="s-resume-status" aria-live="polite"></p>
       </section>
       <section class="card" aria-labelledby="s-search-title">
-        <div class="card-head"><h2 id="s-search-title">搜索设置</h2><p class="hint">用逗号分隔多个词。保存后会重新搜索。</p></div>
+        <div class="card-head"><h2 id="s-search-title">搜索设置</h2><p class="hint">用逗号分隔多个词。保存后会重新搜索。发布超过天数的职位不再显示（改回天数会带着原来的分数重新出现）；自己用链接添加的职位不受天数限制。</p></div>
         <div class="form">
           <label class="full">地点<input id="s-places" type="text" placeholder="例如：Bethlehem, Allentown, United States"></label>
           <label class="full">排除职位里含有的词<input id="s-exclude" type="text" placeholder="例如：Intern, Sales"></label>
@@ -378,6 +380,14 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
   <section id="view-jobs" role="tabpanel" aria-labelledby="tab-jobs" hidden>
     <div class="card search-box" id="search-box"></div>
+    <div class="card link-box">
+      <div class="card-head"><h2 id="job-link-title">添加职位链接</h2><p class="hint">自己找到的职位：粘贴它的链接，AIHawk 读出公司、职位和描述，打好分后加到下面的列表里，之后可以像其他职位一样勾选发送。</p></div>
+      <div class="row">
+        <input id="job-link" type="url" inputmode="url" placeholder="https://job-boards.greenhouse.io/…" aria-labelledby="job-link-title">
+        <button class="btn primary" id="job-link-add" type="button">添加到列表</button>
+      </div>
+      <p class="status" id="job-link-status" aria-live="polite"></p>
+    </div>
     <div id="job-notices"></div>
     <div class="card progress" id="progress" hidden></div>
     <div class="filters">
@@ -443,7 +453,7 @@ tr.chosen { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   </section>
 
   <section class="card">
-    <div class="card-head records-head"><div><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态；勾选后可以删除</p></div><button class="btn danger" id="rec-delete" type="button" hidden>删除所选</button></div>
+    <div class="card-head records-head"><div><h2>全部申请</h2><p class="hint">点击一行查看详情、职位描述，并更新跟进状态；勾选后可以删除；「未发出」和「已发送，未确认」的可以放回找到的职位重新申请</p></div><div class="head-actions"><button class="btn" id="rec-back" type="button" hidden>放回职位列表</button><button class="btn danger" id="rec-delete" type="button" hidden>删除所选</button></div></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th class="pick"><input type="checkbox" id="rec-all" aria-label="选中当前显示的全部记录" title="选中当前显示的记录"></th><th>日期</th><th>公司</th><th>职位</th><th>网站</th><th>AIHawk 结果</th><th>跟进状态</th><th>匹配分</th><th>下一步</th></tr></thead>
@@ -804,6 +814,10 @@ function renderPicked() {
   const button = document.getElementById("rec-delete");
   button.hidden = !state.picked.size;
   button.textContent = `删除所选（${state.picked.size}）`;
+  const back = document.getElementById("rec-back");
+  const unsent = state.items.filter(item => state.picked.has(item.id) && PUT_BACK.includes(item.result)).length;
+  back.hidden = !unsent;
+  back.textContent = `放回职位列表（${unsent}）`;
   const shown = filtered();
   const all = document.getElementById("rec-all");
   const picked = shown.filter(item => state.picked.has(item.id)).length;
@@ -830,6 +844,33 @@ async function deleteRecords(ids) {
   } catch (error) {
     alert(`没有删除：${error.message}`);
     return false;
+  }
+}
+
+// ---------- putting a record back among the jobs found ----------
+// What was not sent, and what was sent without the page confirming it. One the page confirmed stays.
+const PUT_BACK = ["blocked", "failed", "refused", "unconfirmed"];
+async function putBack(ids, button) {
+  const items = state.items.filter(item => ids.includes(item.id) && PUT_BACK.includes(item.result));
+  if (!items.length) return;
+  const names = items.slice(0, 5).map(item => `· ${item.company} · ${item.title}`).join("\n") + (items.length > 5 ? `\n… 共 ${items.length} 条` : "");
+  const skipped = ids.length - items.length;
+  const note = skipped ? `\n\n另外 ${skipped} 条已经确认发出，不会放回。` : "";
+  const maybe = items.filter(item => item.result === "unconfirmed").length;
+  const warn = maybe ? `\n\n注意：其中 ${maybe} 条是「已发送，未确认」，可能已经投出去了。重新发送可能会对同一个职位投两次，建议先去网站或邮箱确认没有收到。` : "";
+  if (!confirm(`把这 ${items.length} 条记录放回「找到的职位」？\n\n${names}${note}${warn}\n\n放回后可以在「找到的职位」里重新勾选发送；这些记录的跟进状态和备注会删除。`)) return;
+  if (button) button.disabled = true;
+  try {
+    const body = await post("/api/job/back", { ids: items.map(item => item.id) });
+    for (const item of items) state.picked.delete(item.id);
+    if (!drawer.hidden && items.some(item => item.id === state.openId)) closeDrawer();
+    await Promise.all([load(), loadFound()]);
+    jobs.flash = "";
+    alert(`已放回 ${body.back} 个职位，可以在「找到的职位」里重新发送。`);
+  } catch (error) {
+    alert(`没有放回：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
   }
 }
 
@@ -895,7 +936,9 @@ async function openDrawer(id) {
       el("button", { class: "btn", type: "button", "aria-label": "关闭", text: "关闭", onclick: closeDrawer })),
     links.length ? el("div", { class: "links" }, ...links) : null,
     el("dl", { class: "facts" }, ...facts.flatMap(([name, value]) => [el("dt", { text: name }), el("dd", { text: value })])),
-    el("div", { class: "links" }, el("button", { class: "btn danger", type: "button", text: "删除这条记录", onclick: () => deleteRecords([item.id]) })),
+    el("div", { class: "links" },
+      PUT_BACK.includes(item.result) ? el("button", { class: "btn", type: "button", text: "放回「找到的职位」", title: "放回职位列表，可以重新申请", onclick: e => putBack([item.id], e.currentTarget) }) : null,
+      el("button", { class: "btn danger", type: "button", text: "删除这条记录", onclick: () => deleteRecords([item.id]) })),
     item.manual ? el("div", { class: "links" },
       el("button", { class: "btn", type: "button", text: "撤销手动申请", title: "标记错了：把它放回「找到的职位」", onclick: e => undoManual(item, e.currentTarget) })) : null,
     el("h3", { text: "跟进" }),
@@ -1140,6 +1183,29 @@ function renderSelbar() {
   document.getElementById("sel-why").textContent = sending() ? "" : why;
   document.getElementById("sel-send").disabled = sending() || !count || Boolean(why);
   document.getElementById("sel-clear").disabled = sending() || !count;
+}
+
+// ---------- a job added from its link ----------
+async function addLink(button) {
+  const input = document.getElementById("job-link");
+  const url = input.value.trim();
+  if (!url) return setStatus("job-link-status", "先粘贴职位链接。", true);
+  button.disabled = true;
+  setStatus("job-link-status", "正在读取职位页面并打分，大约半分钟…");
+  try {
+    const body = await post("/api/found/add", { url });
+    const name = `${body.company} · ${body.title}`;
+    if (body.tried) setStatus("job-link-status", `这个职位已经申请过了：${name}（${body.status_words}）。可以在「申请记录」里查看。`);
+    else if (!body.new) setStatus("job-link-status", `这个职位已经在列表里：${name}（${body.status_words}${typeof body.score === "number" ? `，匹配分 ${body.score.toFixed(1)}` : ""}）。`);
+    else setStatus("job-link-status", `已添加：${name}${typeof body.score === "number" ? `，匹配分 ${body.score.toFixed(1)}` : `（${body.status_words}）`}。`);
+    input.value = "";
+    await loadFound();
+    if (!body.tried) openJobDrawer(body.id);
+  } catch (error) {
+    setStatus("job-link-status", `没有添加：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------- one job found ----------
@@ -1618,6 +1684,9 @@ async function saveSearch(button) {
       max_age_days: Number(document.getElementById("s-days").value) }) };
     renderSettings(true);
     setStatus("s-search-status", "已保存，正在重新搜索。");
+    // The jobs found are listed within the new days at once; the search then dates the ones kept from before.
+    loadFound();
+    loadUsers().catch(() => {});
     loadSearch();
   } catch (error) {
     setStatus("s-search-status", `没有保存：${error.message}`, true);
@@ -1838,6 +1907,7 @@ async function startSearch(path) {
 // ---------- wiring ----------
 document.getElementById("search").addEventListener("input", e => { state.search = e.target.value; renderChips(); renderTable(); });
 document.getElementById("rec-delete").addEventListener("click", () => deleteRecords([...state.picked]));
+document.getElementById("rec-back").addEventListener("click", e => putBack([...state.picked], e.currentTarget));
 document.getElementById("rec-all").addEventListener("change", e => {
   for (const item of filtered()) { if (e.target.checked) state.picked.add(item.id); else state.picked.delete(item.id); }
   renderTable();
@@ -1875,6 +1945,8 @@ document.getElementById("job-all").addEventListener("change", e => {
   for (const item of jobsShown().slice(0, jobs.limit)) { if (e.target.checked) jobs.selected.add(item.id); else jobs.selected.delete(item.id); }
   renderPicks();
 });
+document.getElementById("job-link-add").addEventListener("click", e => addLink(e.currentTarget));
+document.getElementById("job-link").addEventListener("keydown", e => { if (e.key === "Enter") addLink(document.getElementById("job-link-add")); });
 document.getElementById("sel-clear").addEventListener("click", () => { jobs.selected.clear(); renderPicks(); });
 document.getElementById("sel-send").addEventListener("click", openConfirm);
 let resizeTimer;

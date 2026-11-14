@@ -46,6 +46,15 @@ class Job:
     description: str
     # How well the title and the place fit the search, from 0 to 1 against the best one found.
     lexical: float = 0.0
+    # When it was posted, as ISO text: "" when its source gives no date, None when it is not known here.
+    posted_at: str | None = None
+
+
+def posted_text(value: object) -> str:
+    """A posting's date as ISO text that sorts as time does; "" for none."""
+    if value is None or value == "":
+        return ""
+    return (value.isoformat() if isinstance(value, datetime) else str(value)).replace(" ", "T")
 
 
 def posting_keys(urls: list[str]) -> list[str]:
@@ -258,6 +267,7 @@ def search(library: Library, filters: Filters, max_age_days: int, limit: int = R
     best = max((score for score, _ in ranked), default=1.0) or 1.0
     # Some sources publish their names with HTML entities still in them.
     return [
-        Job(row.url, html.unescape(row.company), html.unescape(row.title), html.unescape(row.location), row.url, row.url, "", score / best)
+        Job(row.url, html.unescape(row.company), html.unescape(row.title), html.unescape(row.location), row.url, row.url, "", score / best,
+            posted_text(row.posted))
         for score, row in ranked
     ]

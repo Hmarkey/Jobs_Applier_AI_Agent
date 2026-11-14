@@ -7,6 +7,7 @@ import json
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,8 +22,8 @@ from textual.widgets import DataTable, Input, RichLog, Static
 
 import aihawk.tui as tui_module
 from aihawk import apply as apply_module
+from aihawk import scoring, telemetry
 from aihawk import session as session_module
-from aihawk import telemetry
 from aihawk.apply import Outcome
 from aihawk.cli import main as cli_main
 from aihawk.config import Config, ConfigError, load_config
@@ -902,6 +903,50 @@ def test_a_posting_with_no_description_is_scored_on_its_title_and_no_page_is_rea
     assert session.store.get("bare").score is not None and session.store.get("bare").job.description == ""  # type: ignore[union-attr]
     asked = json.dumps(session._client.posts)  # type: ignore[union-attr]
     assert "Stored text." in asked
+    session.close()
+
+
+def test_a_job_added_from_its_link_is_kept_with_its_text_and_scored_at_once(home: Path, resume: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(home)
+    session._client = ScriptedModelForApp()  # type: ignore[assignment]
+    asyncio.run(session.load_resume(resume))
+    page = ('<script type="application/ld+json">{"@type": "JobPosting", "title": "Python Engineer", "hiringOrganization": {"name": "Bestco"},'
+            ' "description": "Write Python."}</script>')
+    fetched: list[str] = []
+    monkeypatch.setattr("aihawk.posting.fetch", lambda url: (fetched.append(url), ("https://bestco.example/jobs/1", page))[1])
+    stored, new = asyncio.run(session.add_link("https://bestco.example/jobs/1?utm_source=x"))
+    assert new and stored.status == "scored" and stored.score == scoring.score(0.875)
+    assert (stored.job.company, stored.job.title, stored.job.description) == ("Bestco", "Python Engineer", "Write Python.")
+    # The same posting again, under another of its links: what is here is said, and its page is not read again.
+    again, new = asyncio.run(session.add_link("https://bestco.example/jobs/1/apply"))
+    assert not new and again.job.id == stored.job.id and fetched == ["https://bestco.example/jobs/1?utm_source=x"]
+    # A round of scoring later keeps the text read off its page, which the job database does not have.
+    session.store.set_statuses([stored.job.id], "new")
+    monkeypatch.setattr(session.library, "descriptions", lambda urls: [""] * len(urls))
+    asyncio.run(session.read(lambda _: None))
+    assert session.store.get(stored.job.id).job.description == "Write Python."  # type: ignore[union-attr]
+    session.close()
+
+
+def test_fewer_days_leave_the_older_jobs_out_after_a_search_and_one_added_by_hand_stays(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(home)
+    old, kept = "https://old.example/1", "https://old.example/2"
+    for url in (old, kept):
+        session.store.add(Job(url, "Firm", "Python Engineer", "Milan", url, url, "A posting.", 0.5))
+        session.store.set_score(url, 4.0)
+    session.change_setting("max_age_days", "3")
+    # The search finds neither any more (they are older than its days): their dates are looked up in the job database.
+    monkeypatch.setattr(session_module, "search", lambda *args: [])
+    ten_days_ago = (datetime.now(UTC) - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+    monkeypatch.setattr(session.library, "posted_dates", lambda urls: dict.fromkeys(urls, ten_days_ago))
+    asyncio.run(session.find())
+    assert session.store.with_status("scored") == [] and session.store.all() == []
+    # Chosen by its link: listed whatever its date.
+    _, new = asyncio.run(session.add_link(kept))
+    assert not new and [item.job.id for item in session.store.all()] == [kept]
+    # More days again: the other one is back with its score.
+    session.change_setting("max_age_days", "30")
+    assert {item.job.id: item.score for item in session.store.with_status("scored")} == {old: 4.0, kept: 4.0}
     session.close()
 
 

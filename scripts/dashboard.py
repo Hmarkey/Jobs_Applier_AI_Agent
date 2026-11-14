@@ -51,6 +51,7 @@ from aihawk.config import DEFAULT_BASE_URL, DEFAULT_DATABASE, DEFAULT_MAX_AGE_DA
 from aihawk.database import DatabaseError, load_manifest
 from aihawk.library import STATE, Library, LibraryError, Stopped
 from aihawk.llm import ACCOUNT_CAUSES, account_problem, no_credit, refused
+from aihawk.posting import PostingError
 from aihawk.profile import CV_NAME_FILE, save_setting
 from aihawk.scoring import NotAnswering
 from aihawk.screens import readable
@@ -58,7 +59,7 @@ from aihawk.session import BALANCE_PATH, WIDE, Session
 from aihawk.standing import append as append_standing
 from aihawk.standing import load as load_standing
 from aihawk.standing import path_of as standing_path
-from aihawk.store import OWN_ANSWERS, SENT_WORDS, SUBMITTED, Proof, Store, write_applied
+from aihawk.store import OWN_ANSWERS, SENT_WORDS, SUBMITTED, Proof, Store, window, write_applied
 from aihawk.telemetry import vendor_of
 from aihawk.tui import RETRY_PAUSES
 
@@ -150,6 +151,9 @@ CREATE TABLE IF NOT EXISTS tracking (
 DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 LIMITS = {"next_event": 200, "notes": 10_000}
 TRIED = tuple(SENT_WORDS)
+# What AIHawk tried that can go back among the jobs found, to be tried again: what it did not send, and what it clicked to send
+# without the page confirming it (the page says, before, that this may send it a second time). One the page confirmed stays.
+PUT_BACK = ("blocked", "failed", "refused", "unconfirmed")
 # Where a job the search found stands before it is tried.
 FOUND = {
     "scored": "已打分",
@@ -171,16 +175,24 @@ class Data:
         self.jobs = self.data_dir / "jobs.db"
         self.proofs = (self.data_dir / "proofs").resolve()
         self.tracking = self.data_dir / "tracking.db"
-        if not self.jobs.is_file():
-            # A person just added has no store yet: AIHawk's own makes it, empty, so the page can read it.
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-            Store(self.jobs).close()
+        # Opened once by AIHawk's own Store: a person just added gets one, empty, and an older one the columns read here.
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        Store(self.jobs).close()
         with self._tracking() as db:
             db.execute(TRACKING_SCHEMA)
             # A tracking file from before records could be deleted gets the column; its rows are all kept.
             if "deleted" not in {row[1] for row in db.execute("PRAGMA table_info(tracking)")}:
                 db.execute("ALTER TABLE tracking ADD COLUMN deleted TEXT NOT NULL DEFAULT ''")
             db.commit()
+
+    def _window(self) -> tuple[str, tuple[Any, ...]]:
+        """The condition on the jobs found that are listed: posted within the days the person's search is over, as the
+        settings say now, so a change shows at once; a job they added by hand whenever it was posted."""
+        try:
+            days: int | None = load_config(self.data_dir.parent).max_age_days
+        except ConfigError:
+            days = None
+        return window(days)
 
     @contextmanager
     def _store(self) -> Iterator[sqlite3.Connection]:
@@ -324,11 +336,12 @@ class Data:
         """Every job the search found that AIHawk has not tried: the scored first, by their score, which is what the page shows,
         and the title's fit among equal scores; then the rest by the title's fit."""
         marks = ",".join("?" * len(TRIED))
+        shown, values = self._window()
         with self._store() as db:
             rows = db.execute(
                 "SELECT id, company, title, location, url, apply_url, status, score, lexical, length(description) > 0 AS described"
-                f" FROM jobs WHERE status NOT IN ({marks})",
-                TRIED,
+                f" FROM jobs WHERE status NOT IN ({marks}) AND {shown}",
+                (*TRIED, *values),
             ).fetchall()
         scored = sorted((row for row in rows if row["score"] is not None), key=lambda row: (-row["score"], -row["lexical"], row["id"]))
         rest = sorted((row for row in rows if row["score"] is None), key=lambda row: (-row["lexical"], row["id"]))
@@ -370,10 +383,13 @@ class Data:
         """These jobs, in this order, each one found and not tried; a LookupError names how many are not."""
         marks = ",".join("?" * len(job_ids))
         tried = ",".join("?" * len(TRIED))
+        shown, values = self._window()
         with self._store() as db:
             rows = {
                 row["id"]: row
-                for row in db.execute(f"SELECT id, company, title FROM jobs WHERE id IN ({marks}) AND status NOT IN ({tried})", (*job_ids, *TRIED))
+                for row in db.execute(
+                    f"SELECT id, company, title FROM jobs WHERE id IN ({marks}) AND status NOT IN ({tried}) AND {shown}", (*job_ids, *TRIED, *values)
+                )
             }
         missing = [job_id for job_id in job_ids if job_id not in rows]
         if missing:
@@ -412,6 +428,32 @@ class Data:
         with self._tracking() as db:
             db.execute("DELETE FROM tracking WHERE job_id = ?", (job_id,))
             db.commit()
+
+    def put_back(self, job_ids: object) -> int:
+        """These records of jobs AIHawk did not send, or sent without the page confirming it, back among the jobs found as
+        they were before it tried them: scored if they had a score, to be tried again. Your tracking of them goes too. How
+        many went back."""
+        if not isinstance(job_ids, list) or not job_ids or not all(isinstance(job_id, str) and job_id for job_id in job_ids):
+            raise ValueError("请选择要放回的记录")
+        shown = {item["id"] for item in self.items()}
+        chosen = [job_id for job_id in dict.fromkeys(job_ids) if job_id in shown]
+        marks = ",".join("?" * len(chosen))
+        with self._store() as db:
+            rows = db.execute(f"SELECT id, status, score FROM jobs WHERE id IN ({marks})", chosen).fetchall() if chosen else []
+        rows = [row for row in rows if row["status"] in PUT_BACK]
+        if not rows:
+            raise LookupError("所选的记录都已经确认发出，不能放回，请刷新")
+        store = Store(self.jobs)
+        try:
+            for row in rows:
+                store.set_status(row["id"], "scored" if row["score"] is not None else "new")
+                store.set_proof(row["id"], Proof())
+        finally:
+            store.close()
+        with self._tracking() as db:
+            db.executemany("DELETE FROM tracking WHERE job_id = ?", [(row["id"],) for row in rows])
+            db.commit()
+        return len(rows)
 
     def _applied_csv(self, store: Store) -> None:
         """applied.csv, which AIHawk writes after each application, written again so that it lists what you did yourself too."""
@@ -1001,6 +1043,32 @@ class Person:
         entry = self.hub.users.get(self.id)
         return entry["name"] if entry else self.id
 
+    def add_link(self, url: object) -> dict[str, Any]:
+        """A job from a link the person pasted, among their jobs found and scored: what the page says about it. One already
+        here, found or tried, is left as it is and said."""
+        if not isinstance(url, str) or not url.strip() or len(url.strip()) > 2000:
+            raise ValueError("请粘贴职位链接")
+        session = self.hub.session(self.workspace)
+        try:
+            stored, new = asyncio.run(session.add_link(url.strip()))
+        except PostingError as error:
+            raise ValueError(str(error)) from error
+        except Exception as error:
+            # Said on the page; an unexpected one goes to the log.
+            words = _account_words(error)
+            if not words:
+                _record_error(error, self.hub.root)
+                words = f"读取链接时出错：{type(error).__name__}，详情见 {self.hub.root / errors.LOG}。"
+            raise ValueError(words) from error
+        finally:
+            session.close()
+        tried = stored.status in TRIED
+        return {
+            "id": stored.job.id, "company": stored.job.company, "title": stored.job.title, "location": stored.job.location,
+            "new": new, "tried": tried, "score": stored.score,
+            "status_words": RESULTS.get(stored.status, stored.status) if tried else FOUND.get(stored.status, stored.status),
+        }
+
     def busy(self) -> str:
         """What of theirs holds the browser now, in plain words; empty when nothing does."""
         if self.sender.state()["running"]:
@@ -1147,8 +1215,9 @@ class Person:
         return path
 
     def counts(self) -> dict[str, int]:
+        shown, values = self.data._window()
         with self.data._store() as db:
-            rows = dict(db.execute("SELECT status, count(*) FROM jobs GROUP BY status").fetchall())
+            rows = dict(db.execute(f"SELECT status, count(*) FROM jobs WHERE {shown} GROUP BY status", values).fetchall())
         return {
             "found": sum(count for status, count in rows.items() if status not in TRIED),
             "applied": sum(rows.get(status, 0) for status in SUBMITTED),
@@ -1557,6 +1626,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                     return self._json(person.mail.done())
                 if path == "/api/search":
                     return self._json(hub.search(person), HTTPStatus.ACCEPTED)
+                if path == "/api/found/add":
+                    return self._json(person.add_link(change.get("url")))
                 if path == "/api/score/more":
                     return self._json(hub.search(person, rounds=1, search=False), HTTPStatus.ACCEPTED)
                 if path == "/api/apply":
@@ -1572,6 +1643,10 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/manual/undo":
                     data.undo_manual(self._job_id())
                     return self._json({"ok": True})
+                if path == "/api/job/back":
+                    if sender.state()["running"] and set(change.get("ids") or []) & {job["id"] for job in sender.state()["queue"]}:
+                        raise Busy("这批正在发送的申请里有要放回的记录，等发送结束后再放回")
+                    return self._json({"back": data.put_back(change.get("ids"))})
                 if path == "/api/job/delete":
                     if sender.state()["running"] and set(change.get("ids") or []) & {job["id"] for job in sender.state()["queue"]}:
                         raise Busy("这批正在发送的申请里有要删除的记录，等发送结束后再删")
@@ -1586,7 +1661,7 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
             except LookupError as error:
                 words = {"/api/apply": str(error), "/api/manual": "这个职位已经申请过或不在列表里了，请刷新", "/api/manual/undo": "只有手动标记的申请可以撤销",
                          "/api/questions/add": "这个问题已经处理过了，请刷新", "/api/questions/ignore": "这个问题已经处理过了，请刷新",
-                         "/api/job/delete": str(error)}
+                         "/api/job/delete": str(error), "/api/job/back": str(error)}
                 self._json({"error": words.get(path, "not found")}, HTTPStatus.NOT_FOUND)
             except (ValueError, ConfigError) as error:
                 self._json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
@@ -1601,8 +1676,8 @@ def handler(hub: Hub, port: int) -> type[BaseHTTPRequestHandler]:
 
 POSTS = (
     "/api/users", "/api/users/rename", "/api/key", "/api/resume", "/api/settings", "/api/answers", "/api/mail", "/api/mail/signin",
-    "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/questions/add", "/api/questions/ignore", "/api/search", "/api/score/more", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
-    "/api/manual", "/api/manual/undo", "/api/job/delete", "/api/remote", "/api/login", "/api/logout",
+    "/api/mail/signin/done", "/api/simplify", "/api/simplify/setup", "/api/questions/add", "/api/questions/ignore", "/api/search", "/api/score/more", "/api/found/add", "/api/job", "/api/apply", "/api/apply/stop", "/api/apply/terminate",
+    "/api/manual", "/api/manual/undo", "/api/job/delete", "/api/job/back", "/api/remote", "/api/login", "/api/logout",
 )
 # What only this computer does: the people and the shared key, who may sign in from outside, and the browser windows that
 # open on this screen (a visitor from outside could not see them).

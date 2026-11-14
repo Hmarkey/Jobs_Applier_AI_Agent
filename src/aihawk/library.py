@@ -18,6 +18,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from importlib import resources
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -151,6 +152,34 @@ class Library:
         finally:
             connection.close()
         return [found.get(url) or "" for url in urls]
+
+    def posted_dates(self, urls: list[str]) -> dict[str, Any]:
+        """When each of these postings was posted, by address: None for one with no date or not here."""
+        connection = duckdb.connect()
+        try:
+            if not urls or not self.view(connection):
+                return dict.fromkeys(urls)
+            marks = ", ".join("?" for _ in urls)
+            found = dict(connection.execute(f"SELECT url, posted_at FROM postings WHERE url IN ({marks})", urls).fetchall())
+        finally:
+            connection.close()
+        return {url: found.get(url) for url in urls}
+
+    def posting(self, url: str) -> dict[str, str] | None:
+        """The posting at this link as it is here: under the link itself, else under another of its links (the same key, as
+        key.sql says). None when it is not here."""
+        columns = "url, coalesce(title, ''), coalesce(company, ''), coalesce(location, ''), coalesce(description, '')"
+        connection = duckdb.connect()
+        try:
+            if not self.view(connection):
+                return None
+            row = connection.execute(f"SELECT {columns} FROM postings WHERE url = ? LIMIT 1", [url]).fetchone()
+            if row is None:
+                connection.execute(resources.files("aihawk").joinpath("key.sql").read_text(encoding="utf-8"))
+                row = connection.execute(f"SELECT {columns} FROM postings WHERE posting_key(url) = posting_key(?) LIMIT 1", [url]).fetchone()
+        finally:
+            connection.close()
+        return dict(zip(("url", "title", "company", "location", "description"), row, strict=True)) if row else None
 
     # Bringing it here.
 

@@ -7,9 +7,11 @@ import errno
 import io
 import json
 import socket
+import sqlite3
 import textwrap
 import urllib.error
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -685,3 +687,75 @@ def test_a_download_stops_at_its_next_part_when_aihawk_closes(tmp_path: Path, mo
     with pytest.raises(Stopped):
         library.sync(manifest, "unused")
     assert not library.chunk_files() and not list((tmp_path / "here").rglob("*.part"))
+
+
+# ---------- the days a search is over, kept for the jobs it found ----------
+
+
+def test_a_job_found_carries_when_it_was_posted_and_the_library_says_it_by_address(tmp_path: Path) -> None:
+    location = database(tmp_path)
+    jobs = {job.title: job for job in found(location, Filters(include=("python",)), 60, tmp_path)}
+    assert jobs["Senior Python Engineer"].posted_at == "2099-01-01T00:00:00" and jobs["Python Intern"].posted_at == ""
+    library = Library(tmp_path / "library")
+    dates = library.posted_dates(["https://example.com/4", "https://jobs.lever.co/a/2", "https://no.such/posting"])
+    assert str(dates["https://example.com/4"]).startswith("2001-01-01") and dates["https://jobs.lever.co/a/2"] is None
+    assert dates["https://no.such/posting"] is None
+
+
+def dated(store: Store, name: str, posted_at: str | None, status: str = "new") -> str:
+    url = f"https://jobs.example.com/{name}"
+    store.add(Job(url, "Co", name, "Rome", url, url, "d", 0.5, posted_at))
+    if status != "new":
+        store.set_status(url, status)
+    return url
+
+
+def test_the_store_lists_and_scores_only_the_jobs_within_the_days_and_keeps_the_rest_for_later(tmp_path: Path) -> None:
+    store = Store(tmp_path / "jobs.db")
+    fresh = dated(store, "fresh", (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S"))
+    old = dated(store, "old", "2001-01-01T00:00:00")
+    undated = dated(store, "undated", "")
+    unknown = dated(store, "unknown", None)
+    chosen = dated(store, "chosen", "2001-01-01T00:00:00")
+    store.mark_by_hand(chosen)
+    sent = dated(store, "sent", "2001-01-01T00:00:00", "submitted")
+    assert {item.job.id for item in store.with_status("new")} == {fresh, old, undated, unknown, chosen}
+    store.window_days = 3
+    assert {item.job.id for item in store.with_status("new")} == {fresh, undated, unknown, chosen}
+    assert {item.job.id for item in store.all()} == {fresh, undated, unknown, chosen, sent}
+    # The days grow again: the old job is back, as it was.
+    store.window_days = 60 * 365 * 30
+    assert old in {item.job.id for item in store.with_status("new")}
+    store.close()
+
+
+def test_a_job_found_again_takes_its_new_date_and_one_never_dated_is_dated_from_the_library(tmp_path: Path) -> None:
+    store = Store(tmp_path / "jobs.db")
+    old = dated(store, "old", None)
+    store.set_score(old, 4.0)
+    assert store.undated() == [old]
+    store.set_posted({old: datetime(2001, 1, 1, 9, 30)})
+    assert store.undated() == [] and store.get(old).job.posted_at == "2001-01-01T09:30:00"  # type: ignore[union-attr]
+    store.add_all([Job(old, "Co", "old", "Rome", old, old, "", 0.9, "2099-01-01T00:00:00")])
+    kept = store.get(old)
+    assert kept is not None and kept.job.posted_at == "2099-01-01T00:00:00" and kept.score == 4.0 and kept.status == "scored"
+    # None found and None set: a job whose date the library does not have is dated "", and not looked up again.
+    other = dated(store, "other", None)
+    store.set_posted({other: None})  # type: ignore[dict-item]
+    assert store.undated() == [] and store.get(other).job.posted_at == ""  # type: ignore[union-attr]
+    store.close()
+
+
+def test_an_older_store_gets_the_date_and_the_mark_by_hand(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.db"
+    Store(path).close()
+    connection = sqlite3.connect(path)
+    connection.execute("ALTER TABLE jobs DROP COLUMN posted_at")
+    connection.execute("ALTER TABLE jobs DROP COLUMN by_hand")
+    connection.commit()
+    connection.close()
+    store = Store(path)
+    dated(store, "back", None)
+    store.close()
+    columns = {row[1] for row in sqlite3.connect(path).execute("PRAGMA table_info(jobs)")}
+    assert {"posted_at", "by_hand"} <= columns

@@ -17,10 +17,11 @@ from aihawk import errors
 from aihawk.apply import MAILBOXES, NOTE, BrowserDidNotOpen, Outcome, apply_to_job, no_browser_here, signed_in, site_of
 from aihawk.apply import sign_in as sign_in_browser
 from aihawk.config import DEFAULT_BASE_URL, KEY_ENV, Config, ConfigError, load_config
-from aihawk.database import load_manifest, search
+from aihawk.database import Job, load_manifest, search
 from aihawk.library import Library
 from aihawk.llm import ACCOUNT_CAUSES, SPEND, Mark, cause, make_client, no_credit, not_answering, refused
 from aihawk.plugins import Plugin, always_plugins, load_plugins, plugin_for
+from aihawk.posting import check_link, read_link
 from aihawk.profile import CV_NAME_FILE, ensure_account_password, import_answers_file, install_resume, save_setting
 from aihawk.scoring import NOT_JUDGED, NotAnswering, fits, question, score
 from aihawk.standing import brief as standing_brief
@@ -48,6 +49,8 @@ class Session:
         self.config = load_config(workspace)
         self.plugins: tuple[Plugin, ...] = load_plugins(workspace)
         self.store = Store(self.config.store_file)
+        # The jobs listed and scored are those posted within the search's days, as the search itself finds them.
+        self.store.window_days = self.config.max_age_days
         self.telemetry = Telemetry(self.config.data_dir)
         import_answers_file(self.config, self.store)
         ensure_account_password(self.store)
@@ -174,11 +177,16 @@ class Session:
 
     async def load_resume(self, path: Path) -> None:
         await install_resume(self.client, self.config, path, self.store)
-        self.config = load_config(self.workspace)
+        self._reload()
 
     def change_setting(self, name: str, value: str) -> None:
         save_setting(self.config, name, value)
+        self._reload()
+
+    def _reload(self) -> None:
+        """The settings read again from the workspace, and the days of the jobs listed with them."""
         self.config = load_config(self.workspace)
+        self.store.window_days = self.config.max_age_days
 
     def mail(self) -> tuple[str, str]:
         """The address the person applies with, and its mailbox: gmail, outlook, later (left for later) or empty (never asked)."""
@@ -223,6 +231,10 @@ class Session:
         """Bring the postings for this search, of those on this computer, into the store; how many are new."""
         jobs = await asyncio.to_thread(search, self.library, self.config.filters, self.config.max_age_days)
         new = self.store.add_all(jobs)
+        # Jobs kept from before, and found no more by this search (posted before its days, say): their dates looked up, so
+        # that those outside the days are not listed.
+        if undated := self.store.undated():
+            self.store.set_posted(await asyncio.to_thread(self.library.posted_dates, undated))
         self.telemetry.search(found=len(jobs), new=new)
         return new
 
@@ -237,6 +249,8 @@ class Session:
         started = time.monotonic()
         # From this computer, by the posting's address: a job kept from an earlier build has its text there too.
         texts = await asyncio.to_thread(self.library.descriptions, [item.job.url for item in batch])
+        # A job added from its link may not be in the database: the text read off its page stays.
+        texts = [text or item.job.description for item, text in zip(batch, texts, strict=True)]
         for item, text in zip(batch, texts, strict=True):
             self.store.set_description(item.job.id, text)
         jobs = [replace(item.job, description=text) for item, text in zip(batch, texts, strict=True)]
@@ -265,6 +279,39 @@ class Session:
         if any(unjudged):
             raise NotAnswering
         return answered
+
+    async def add_link(self, url: str) -> tuple[Stored, bool]:
+        """A job the person found themselves, from its link, among the jobs found, to be scored with the others; and whether
+        it is new. One already here, under this link or another of its links, is left as it is."""
+        if (here := self.store.known(check_link(url))) is not None:
+            self.store.mark_by_hand(here.job.id)
+            return here, False
+        job = await read_link(url, self.library, self.client, self.config.decision_model)
+        if (here := self.store.known(job.url)) is not None:
+            self.store.mark_by_hand(here.job.id)
+            return here, False
+        self.store.add(job)
+        self.store.mark_by_hand(job.id)
+        if not self.needs_resume():
+            await self._score_one(job)
+        stored = self.store.get(job.id)
+        assert stored is not None
+        return stored, True
+
+    async def _score_one(self, job: Job) -> None:
+        """One job scored at once, as a round scores each: set aside when Jev gives no verdict, left to the next round when
+        the AI service does not answer."""
+        cv = self.config.cv.read_text(encoding="utf-8-sig")
+        try:
+            (value,) = await fits(self.client, self.config.decision_model, cv, [job], question(self.config.goals, _places(self.config)), lambda why: None)
+        except Exception as error:
+            if not not_answering(error):
+                raise
+            return
+        if isinstance(value, float):
+            self.store.set_score(job.id, score(value))
+        elif value is None:
+            self.store.set_statuses([job.id], "passed_over")
 
     def resume_name(self) -> str:
         """The name of the file the person gave as their resume; empty when it was not kept."""

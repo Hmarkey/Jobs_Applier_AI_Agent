@@ -8,11 +8,11 @@ import os
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aihawk.database import Job, posting_keys
+from aihawk.database import Job, posted_text, posting_keys
 from aihawk.secret import is_sealed, seal, unseal
 
 SCHEMA = """
@@ -157,6 +157,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def window(days: int | None) -> tuple[str, tuple[Any, ...]]:
+    """The SQL condition, and its values, on the jobs shown and scored when the search is over the last `days` days: a job
+    tried stays whenever it was posted, and so does one added by hand from its link, or one whose source gives no date."""
+    if days is None:
+        return "1", ()
+    marks = ",".join("?" * len(SENT_WORDS))
+    since = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    return f"(status IN ({marks}) OR by_hand = 1 OR coalesce(posted_at, '') = '' OR posted_at >= ?)", (*SENT_WORDS, since)
+
+
 def safe_name(text: str) -> str:
     """A job's id as a file name."""
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")[:120]
@@ -208,6 +218,15 @@ class Store:
         if "reason" not in columns:
             self._db.execute("ALTER TABLE jobs ADD COLUMN reason TEXT")
             self._db.commit()
+        # When each job was posted, and whether the person added it by hand: read again by the next search.
+        if "posted_at" not in columns:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN posted_at TEXT")
+            self._db.commit()
+        if "by_hand" not in columns:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN by_hand INTEGER NOT NULL DEFAULT 0")
+            self._db.commit()
+        # The days the search is over: jobs posted before are not listed or scored, and come back when the days grow.
+        self.window_days: int | None = None
         self._db.execute("CREATE INDEX IF NOT EXISTS jobs_key ON jobs (key)")
         if self._db.execute("PRAGMA user_version").fetchone()[0] < KEY_VERSION:
             self._rekey()
@@ -275,11 +294,14 @@ class Store:
             # Only a link has a key worth comparing: another address entirely is another job.
             known = "SELECT 1 FROM jobs WHERE id = ? OR (key = ? AND url LIKE 'http%')" if job.url.startswith("http") else "SELECT 1 FROM jobs WHERE id = ?"
             if self._db.execute(known, (job.id, key) if job.url.startswith("http") else (job.id,)).fetchone():
+                if job.posted_at is not None:
+                    # Found again: its date as the search has it now.
+                    self._db.execute("UPDATE jobs SET posted_at = ? WHERE id = ? OR (key = ? AND url LIKE 'http%')", (job.posted_at, job.id, key))
                 continue
             self._db.execute(
-                "INSERT INTO jobs (id, key, company, title, location, url, apply_url, description, lexical, first_seen, updated)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (job.id, key, job.company, job.title, job.location, job.url, job.apply_url, job.description, job.lexical, now, now),
+                "INSERT INTO jobs (id, key, company, title, location, url, apply_url, description, lexical, first_seen, updated, posted_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job.id, key, job.company, job.title, job.location, job.url, job.apply_url, job.description, job.lexical, now, now, job.posted_at),
             )
             new += 1
         self._db.commit()
@@ -287,7 +309,8 @@ class Store:
 
     @staticmethod
     def _job(row: sqlite3.Row) -> Job:
-        return Job(row["id"], row["company"], row["title"], row["location"], row["url"], row["apply_url"], row["description"], row["lexical"])
+        return Job(row["id"], row["company"], row["title"], row["location"], row["url"], row["apply_url"], row["description"], row["lexical"],
+                   row["posted_at"])
 
     @classmethod
     def _stored(cls, row: sqlite3.Row) -> Stored:
@@ -303,14 +326,36 @@ class Store:
     def _proof(row: sqlite3.Row) -> Proof:
         return Proof(row["sent_at"] or "", row["final_url"] or "", row["verdict"] or "", row["verdict_evidence"] or "", row["page_text"] or "", row["screenshot"] or "")
 
+    def known(self, url: str) -> Stored | None:
+        """The job at this link, when it is here under it or under another of its links."""
+        row = self._db.execute("SELECT * FROM jobs WHERE id = ? OR key = ? LIMIT 1", (url, posting_keys([url])[0])).fetchone()
+        return self._stored(row) if row else None
+
     def get(self, job_id: str) -> Stored | None:
         row = self._db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
         return self._stored(row) if row else None
 
     def with_status(self, status: str) -> list[Stored]:
-        """The postings in this status, the best fit by title first."""
-        rows = self._db.execute("SELECT * FROM jobs WHERE status = ? ORDER BY lexical DESC, rowid", (status,)).fetchall()
+        """The postings in this status within the search's days, the best fit by title first."""
+        clause, values = window(self.window_days)
+        rows = self._db.execute(f"SELECT * FROM jobs WHERE status = ? AND {clause} ORDER BY lexical DESC, rowid", (status, *values)).fetchall()
         return [self._stored(row) for row in rows]
+
+    def mark_by_hand(self, job_id: str) -> None:
+        """A job the person added themselves: listed whenever it was posted."""
+        self._db.execute("UPDATE jobs SET by_hand = 1 WHERE id = ?", (job_id,))
+        self._db.commit()
+
+    def undated(self) -> list[str]:
+        """The addresses of the jobs not tried whose date has not been looked up here yet."""
+        marks = ",".join("?" * len(SENT_WORDS))
+        rows = self._db.execute(f"SELECT url FROM jobs WHERE posted_at IS NULL AND status NOT IN ({marks})", tuple(SENT_WORDS)).fetchall()
+        return [row["url"] for row in rows]
+
+    def set_posted(self, dates: dict[str, str]) -> None:
+        """When the jobs at these addresses were posted ("" for a job with no date), as the job database says."""
+        self._db.executemany("UPDATE jobs SET posted_at = ? WHERE url = ? AND posted_at IS NULL", [(posted_text(date), url) for url, date in dates.items()])
+        self._db.commit()
 
     def forget_untried(self) -> None:
         """Every job the person has not applied to is dropped, so a new search lists its own jobs and no others. A job that
@@ -321,7 +366,8 @@ class Store:
 
     def all(self) -> list[Stored]:
         """What the person sees, the best first: the scored by the score and the title's fit together, then the rest by the title's fit."""
-        items = [self._stored(row) for row in self._db.execute("SELECT * FROM jobs").fetchall()]
+        clause, values = window(self.window_days)
+        items = [self._stored(row) for row in self._db.execute(f"SELECT * FROM jobs WHERE {clause}", values).fetchall()]
         scored = sorted(
             (item for item in items if item.score is not None),
             key=lambda item: (-(item.score + LEXICAL_SHARE * item.job.lexical), -item.job.lexical, item.job.id),
